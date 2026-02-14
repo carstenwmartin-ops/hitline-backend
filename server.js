@@ -1,16 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import fs from 'fs';
 
-// Lese .env Datei manuell
-const envContent = fs.readFileSync('.env', 'utf-8');
-const apiKey = envContent.split('\n')
-  .find(line => line.startsWith('VITE_CLAUDE_API_KEY='))
-  ?.split('=')[1]
-  ?.trim();
+
+// Lese API Key aus Environment Variables
+const apiKey = process.env.VITE_CLAUDE_API_KEY;
 
 if (!apiKey) {
-  console.error('❌ API Key nicht in .env gefunden!');
+  console.error('❌ API Key nicht gefunden! Setze VITE_CLAUDE_API_KEY Environment Variable.');
   process.exit(1);
 }
 
