@@ -215,6 +215,30 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Backend läuft' });
 });
 
+// Last.fm Proxy Route
+app.get('/api/lastfm-similar', async (req, res) => {
+  const { artist } = req.query;
+  
+  const lastfmApiKey = process.env.LASTFM_API_KEY;
+  
+  if (!lastfmApiKey) {
+    return res.status(500).json({ error: 'Last.fm API Key nicht konfiguriert' });
+  }
+  
+  try {
+    const response = await fetch(
+      `https://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=${encodeURIComponent(artist)}&api_key=${lastfmApiKey}&format=json&limit=10`
+    );
+    
+    const data = await response.json();
+    res.json(data);
+    
+  } catch (error) {
+    console.error('Last.fm Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log('🚀 Backend läuft auf http://localhost:' + PORT);
   console.log('📡 Endpoints:');
