@@ -239,6 +239,11 @@ app.get('/api/lastfm-similar', async (req, res) => {
   }
 });
 
+// Firebase Route
+app.get('/api/config', (req, res) => {
+  res.json({ firebaseApiKey: process.env.FIREBASE_API_KEY });
+});
+
 app.listen(PORT, () => {
   console.log('🚀 Backend läuft auf http://localhost:' + PORT);
   console.log('📡 Endpoints:');
