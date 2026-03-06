@@ -223,6 +223,110 @@ app.post('/api/hitline-playlist-tracks', async (req, res) => {
   }
 });
 
+app.post('/api/hitline-playlist-similar', async (req, res) => {
+  const { seeds, totalCount } = req.body;
+  const target = Math.min(Math.max(parseInt(totalCount) || 75, 10), 200);
+
+  if (!seeds || !Array.isArray(seeds) || seeds.length === 0) {
+    return res.status(400).json({ success: false, error: 'Keine Seed-Künstler angegeben' });
+  }
+
+  const cleanSeeds = seeds.map(s => String(s).trim()).filter(Boolean).slice(0, 10);
+  const seedLabel = cleanSeeds.length === 1
+    ? cleanSeeds[0]
+    : `${cleanSeeds[0]} & ${cleanSeeds.length - 1} weitere`;
+
+  console.log(`🔗 Similar-Playlist: Seeds=[${cleanSeeds.join(', ')}], Ziel: ${target} Künstler`);
+
+  try {
+    const allArtists = [];
+    const batchSize = 40;
+    const batches = Math.ceil(target / batchSize);
+
+    for (let i = 0; i < batches; i++) {
+      const currentBatchSize = Math.min(batchSize, target - allArtists.length);
+      if (currentBatchSize <= 0) break;
+
+      const excludeList = allArtists.length > 0
+        ? `\n\nBereits verwendet (NICHT wiederholen): ${allArtists.join(', ')}`
+        : '';
+
+      const seedsFormatted = cleanSeeds.join(', ');
+
+      const requestBody = {
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2000,
+        system: 'Du bist ein Musik-Experte. Erstelle eine Liste von Kuenstlern als JSON-Objekt. WICHTIG: Antworte NUR mit JSON, keine Markdown-Bloecke! Format: {"artists": ["Kuenstler1", "Kuenstler2"]}. Gib NUR Kuenstlernamen zurueck, KEINE Song-Titel. Waehle bekannte, unterschiedliche Kuenstler. KEINE Duplikate!',
+        messages: [{
+          role: 'user',
+          content: `Erstelle eine Liste mit ${currentBatchSize} Kuenstlern die klanglich aehnlich sind wie: ${seedsFormatted}
+
+Die Kuenstler sollen:
+- Aehnlichen Stil, Genre oder Sound haben wie die genannten Kuenstler
+- Real und bekannt sein (auf Streamingdiensten verfuegbar)
+- Abwechslungsreich sein (nicht nur sehr offensichtliche Aehnlichkeiten)
+- Die Seed-Kuenstler selbst NICHT enthalten${excludeList}`
+        }]
+      };
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) throw new Error(`Claude API ${response.status}`);
+
+      const claudeData = await response.json();
+      let responseText = claudeData.content[0].text
+        .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+
+      let parsed;
+      try {
+        parsed = JSON.parse(responseText);
+      } catch (e) {
+        console.warn(`  ⚠️ JSON-Parse fehlgeschlagen Batch ${i + 1}`);
+        continue;
+      }
+
+      if (parsed.artists && Array.isArray(parsed.artists)) {
+        const newArtists = parsed.artists
+          .map(a => String(a).trim())
+          .filter(a => a && !allArtists.includes(a) && !cleanSeeds.some(s => s.toLowerCase() === a.toLowerCase()));
+        allArtists.push(...newArtists);
+        console.log(`  Batch ${i + 1}/${batches}: +${newArtists.length} → gesamt ${allArtists.length}`);
+      }
+
+      if (i < batches - 1) await new Promise(r => setTimeout(r, 500));
+    }
+
+    allArtists.sort(() => Math.random() - 0.5);
+    console.log(`✅ Similar-Playlist fertig: ${allArtists.length} Künstler`);
+
+    res.json({
+      success: true,
+      playlist: {
+        name: `Ähnlich wie ${seedLabel}`,
+        description: `${allArtists.length} Künstler ähnlich wie: ${cleanSeeds.join(', ')}`,
+        type: 'artists',
+        artists: allArtists,
+        tracks: [],
+        aiGenerated: true,
+        tags: cleanSeeds.slice(0, 2),
+        difficulty: 'medium'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Similar-Playlist Fehler:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // =====================================================================
 // PWA: Statische Dateien (manifest, sw.js, icons)
 // =====================================================================
