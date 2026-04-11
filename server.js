@@ -370,6 +370,91 @@ app.get('/api/config', (req, res) => {
   res.json({ firebaseApiKey: process.env.FIREBASE_API_KEY });
 });
 
+// =====================================================================
+// ROUTE: Crossover-Modus — KI-Fakten für One Truth, Once Upon, More Hits
+// =====================================================================
+const callClaudeHaiku = async (system, userContent, maxTokens = 400) => {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5',
+      max_tokens: maxTokens,
+      system,
+      messages: [{ role: 'user', content: userContent }]
+    })
+  });
+  if (!response.ok) {
+    const err = await response.json();
+    throw new Error(`Claude API ${response.status}: ${JSON.stringify(err)}`);
+  }
+  const data = await response.json();
+  return data.content[0].text
+    .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+};
+
+app.post('/api/crossover-facts', async (req, res) => {
+  const { title, artist, year, variant } = req.body;
+  if (!title || !artist || !year || !variant) {
+    return res.status(400).json({ error: 'title, artist, year, variant required' });
+  }
+
+  console.log(`🎯 Crossover [${variant}]: ${artist} – ${title} (${year})`);
+
+  try {
+    let content;
+
+    // ── Variante 3: One Truth ──────────────────────────────────────────
+    if (variant === 'one-truth') {
+      content = await callClaudeHaiku(
+        'Du bist ein Musik-Quiz-Experte. Antworte NUR mit validem JSON, keine Markdown-Bloecke, kein erklaerenden Text.',
+        `Song: "${title}" von "${artist}" (${year}).
+Erstelle ein Quiz-Objekt mit einer echten Aussage und drei ueberzeugenden Blueffs ueber diesen Song, den Kuenstler, das Album oder einen Fun-Fakt.
+Aussagen sollen kurz und knackig sein (max 20 Woerter).
+Format: {"truth": "Die echte Aussage", "bluffs": ["Blueff1", "Blueff2", "Blueff3"], "correctIndex": 0, "explanation": "Kurze Erklaerung warum die Wahrheit stimmt (max 2 Saetze)."}
+correctIndex ist immer 0 (truth ist Option A). Der Frontend shuffelt die Optionen.`,
+        500
+      );
+
+    // ── Variante 4: Once Upon a Time ──────────────────────────────────
+    } else if (variant === 'once-upon') {
+      content = await callClaudeHaiku(
+        'Du bist ein Musik-Quiz-Experte. Antworte NUR mit validem JSON, keine Markdown-Bloecke.',
+        `Jahr: ${year}. Song: "${title}" von "${artist}".
+Erstelle ein Quiz: Drei bekannte Kuenstler, die ${year} tatsaechlich einen Hit hatten (mit echtem Song-Titel aus ${year}), und einen Kuenstler, der in ${year} KEINEN grossen Hit hatte (mit einem echten Song dieses Kuenstlers, aber aus einem anderen Jahr).
+Format: {"hits": [{"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}], "fake": {"artist": "Name", "song": "Titel", "realYear": 1999}, "explanation": "Kurze Erklaerung (1 Satz)."}`,
+        500
+      );
+
+    // ── Variante 5: More Hits ──────────────────────────────────────────
+    } else if (variant === 'more-hits') {
+      content = await callClaudeHaiku(
+        'Du bist ein Musik-Quiz-Experte. Antworte NUR mit validem JSON, keine Markdown-Bloecke.',
+        `Kuenstler: "${artist}", Song: "${title}" (${year}).
+Aufgabe: Welcher Song stammt von ${artist}?
+Gib einen echten weiteren bekannten Song von "${artist}" (nicht "${title}") und drei bekannte Songs von ANDEREN Kuenstlern.
+Format: {"realSong": {"title": "Anderer Song von ${artist}", "artist": "${artist}", "year": 2000}, "fakeSongs": [{"title": "Titel", "artist": "Anderer Kuenstler", "year": 2001}, {"title": "Titel", "artist": "Anderer Kuenstler", "year": 2002}, {"title": "Titel", "artist": "Anderer Kuenstler", "year": 2003}], "explanation": "Kurze Erklaerung (1 Satz)."}`,
+        500
+      );
+
+    } else {
+      return res.status(400).json({ error: `Unbekannte Variante: ${variant}` });
+    }
+
+    const parsed = JSON.parse(content);
+    console.log(`✅ Crossover [${variant}] generiert`);
+    res.json({ success: true, variant, data: parsed });
+
+  } catch (error) {
+    console.error(`❌ Crossover Fehler [${variant}]:`, error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Backend läuft auf Port ${PORT}`);
   console.log('📡 Endpoints:');
