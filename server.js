@@ -434,12 +434,24 @@ correctIndex ist immer 0. Das Frontend shuffelt.`,
 
     // ── Variante 4: Once Upon a Time ──────────────────────────────────
     } else if (variant === 'once-upon') {
+      // Use a random salt so Haiku doesn't always return the same "default" examples
+      const salts = ['Pop','Rock','Dance','R&B','Electronic','Hip-Hop','Latin','Indie'];
+      const genreHint = salts[Math.floor(Math.random() * salts.length)];
+      const decadeHint = Math.floor(year / 10) * 10;
       content = await callClaudeHaiku(
-        'Du bist ein Musik-Quiz-Experte. Antworte NUR mit validem JSON, keine Markdown-Bloecke.',
-        `Jahr: ${year}. Song: "${title}" von "${artist}".
-Erstelle ein Quiz: Drei bekannte Kuenstler, die ${year} tatsaechlich einen Hit hatten (mit echtem Song-Titel aus ${year}), und einen Kuenstler, der in ${year} KEINEN grossen Hit hatte (mit einem echten Song dieses Kuenstlers, aber aus einem anderen Jahr).
+        'Du bist ein Musik-Quiz-Experte mit breitem Wissen. Antworte NUR mit validem JSON, keine Markdown-Bloecke.',
+        `Jahr: ${year}. Song: "${title}" von "${artist}". Genre-Fokus fuer diese Runde: ${genreHint}.
+
+Erstelle ein Quiz: Drei Kuenstler, die ${year} tatsaechlich einen Hit hatten, und einen Kuenstler, der ${year} KEINEN grossen Hit hatte.
+
+WICHTIG fuer Abwechslung:
+- Waehle UNTERSCHIEDLICHE Genres und Laender – nicht nur englischsprachige Pop-Stars
+- Vermeide ueberbenutzte Standardbeispiele wie "Yellow von Coldplay", "...Baby One More Time von Britney Spears" etc.
+- Denke auch an Hits aus dem deutschsprachigen Raum, Lateinamerika, Skandinavien oder Osteuropa aus den ${decadeHint}ern
+- Der Fake-Kuenstler soll plausibel klingen, aber wirklich KEINEN Hit in ${year} gehabt haben
+
 Format: {"hits": [{"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}], "fake": {"artist": "Name", "song": "Titel", "realYear": 1999}, "explanation": "Kurze Erklaerung (1 Satz)."}`,
-        500
+        600
       );
 
     // ── Variante 5: More Hits ──────────────────────────────────────────
