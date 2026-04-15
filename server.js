@@ -432,26 +432,30 @@ correctIndex ist immer 0. Das Frontend shuffelt.`,
         600
       );
 
-    // ── Variante 4: Once Upon a Time ──────────────────────────────────
+    // ── Variante 4: Once Upon a Time — Sonnet für Fakten-Genauigkeit ─────
     } else if (variant === 'once-upon') {
-      // Use a random salt so Haiku doesn't always return the same "default" examples
-      const salts = ['Pop','Rock','Dance','R&B','Electronic','Hip-Hop','Latin','Indie'];
-      const genreHint = salts[Math.floor(Math.random() * salts.length)];
-      const decadeHint = Math.floor(year / 10) * 10;
-      content = await callClaudeHaiku(
-        'Du bist ein Musik-Quiz-Experte mit breitem Wissen. Antworte NUR mit validem JSON, keine Markdown-Bloecke.',
-        `Jahr: ${year}. Song: "${title}" von "${artist}". Genre-Fokus fuer diese Runde: ${genreHint}.
+      const salts = ['A','B','C','D','E','F','G','H'];
+      const salt = salts[Math.floor(Math.random() * salts.length)];
+      content = await callClaude(
+        'Du bist ein Musik-Historiker mit praezisem Faktenwissen. Antworte NUR mit validem JSON, keine Markdown-Bloecke, kein Text ausserhalb des JSON.',
+        `Jahr: ${year}. Salt: ${salt} (ignorieren, nur fuer Abwechslung).
 
-Erstelle ein Quiz: Drei Kuenstler, die ${year} tatsaechlich einen Hit hatten, und einen Kuenstler, der ${year} KEINEN grossen Hit hatte.
+Erstelle ein Quiz: Welcher Kuenstler hatte in ${year} KEINEN grossen Hit?
 
-WICHTIG fuer Abwechslung:
-- Waehle UNTERSCHIEDLICHE Genres und Laender – nicht nur englischsprachige Pop-Stars
-- Vermeide ueberbenutzte Standardbeispiele wie "Yellow von Coldplay", "...Baby One More Time von Britney Spears" etc.
-- Denke auch an Hits aus dem deutschsprachigen Raum, Lateinamerika, Skandinavien oder Osteuropa aus den ${decadeHint}ern
-- Der Fake-Kuenstler soll plausibel klingen, aber wirklich KEINEN Hit in ${year} gehabt haben
+DREI echte Hits aus ${year}:
+- Nenne drei Kuenstler/Bands, die in ${year} nachweislich in den Charts waren (Top 40 irgendwo weltweit)
+- Der Song MUSS wirklich aus ${year} stammen – pruefe sorgfaeltig
+- Die Band/der Kuenstler muss ${year} bereits existiert haben (Gruendungsjahr beachten!)
+- Gerne aus verschiedenen Genres (Rock, Pop, Soul, Country, Schlager, …) – muss aber nicht
 
-Format: {"hits": [{"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}], "fake": {"artist": "Name", "song": "Titel", "realYear": 1999}, "explanation": "Kurze Erklaerung (1 Satz)."}`,
-        600
+EIN Fake:
+- Ein Kuenstler, der in ${year} KEINEN charterfolgreichen Song hatte
+- Kann eine spaeter beruehmt gewordene Band sein, die ${year} noch nicht existierte oder noch keine Hits hatte
+- Nenne einen echten Song dieses Kuenstlers, aber aus einem anderen Jahr (realYear muss korrekt sein!)
+- KEINE erfundenen Songs oder Jahreszahlen!
+
+Format: {"hits": [{"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}], "fake": {"artist": "Name", "song": "Echter Titel dieses Kuenstlers", "realYear": ZAHL}, "explanation": "1 Satz Erklaerung warum der Fake-Kuenstler ${year} keinen Hit hatte."}`,
+        700
       );
 
     // ── Variante 5: More Hits ──────────────────────────────────────────
