@@ -458,15 +458,25 @@ Format: {"hits": [{"artist": "Name", "song": "Titel", "year": ${year}}, {"artist
         700
       );
 
-    // ── Variante 5: More Hits ──────────────────────────────────────────
+    // ── Variante 5: More Hits — Sonnet für Fakten-Genauigkeit ────────────
     } else if (variant === 'more-hits') {
-      content = await callClaudeHaiku(
-        'Du bist ein Musik-Quiz-Experte. Antworte NUR mit validem JSON, keine Markdown-Bloecke.',
+      content = await callClaude(
+        'Du bist ein Musik-Historiker mit praezisem Faktenwissen. Antworte NUR mit validem JSON, keine Markdown-Bloecke, kein Text ausserhalb des JSON.',
         `Kuenstler: "${artist}", Song: "${title}" (${year}).
-Aufgabe: Welcher Song stammt von ${artist}?
-Gib einen echten weiteren bekannten Song von "${artist}" (nicht "${title}") und drei bekannte Songs von ANDEREN Kuenstlern.
-Format: {"realSong": {"title": "Anderer Song von ${artist}", "artist": "${artist}", "year": 2000}, "fakeSongs": [{"title": "Titel", "artist": "Anderer Kuenstler", "year": 2001}, {"title": "Titel", "artist": "Anderer Kuenstler", "year": 2002}, {"title": "Titel", "artist": "Anderer Kuenstler", "year": 2003}], "explanation": "Kurze Erklaerung (1 Satz)."}`,
-        500
+
+Aufgabe: Welcher Song stammt wirklich von "${artist}"?
+
+ECHTER Song (realSong):
+- Ein anderer bekannter, nachweislich existierender Song von "${artist}" – NICHT "${title}"
+- Song und Jahreszahl muessen korrekt sein – nichts erfinden!
+
+DREI Fake-Songs (fakeSongs):
+- Echte, bekannte Songs von ANDEREN Kuenstlern – keine erfundenen Titel
+- Titel und Kuenstler muessen real existieren
+- Jahreszahl des jeweiligen Songs korrekt angeben
+
+Format: {"realSong": {"title": "Echter Titel", "artist": "${artist}", "year": ZAHL}, "fakeSongs": [{"title": "Echter Titel", "artist": "Anderer Kuenstler", "year": ZAHL}, {"title": "Echter Titel", "artist": "Anderer Kuenstler", "year": ZAHL}, {"title": "Echter Titel", "artist": "Anderer Kuenstler", "year": ZAHL}], "explanation": "1 Satz Erklaerung."}`,
+        600
       );
 
     } else {
