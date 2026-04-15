@@ -413,11 +413,23 @@ app.post('/api/crossover-facts', async (req, res) => {
       content = await callClaudeHaiku(
         'Du bist ein Musik-Quiz-Experte. Antworte NUR mit validem JSON, keine Markdown-Bloecke, kein erklaerenden Text.',
         `Song: "${title}" von "${artist}" (${year}).
-Erstelle ein Quiz-Objekt mit einer echten Aussage und drei ueberzeugenden Blueffs ueber diesen Song, den Kuenstler, das Album oder einen Fun-Fakt.
-Aussagen sollen kurz und knackig sein (max 20 Woerter).
-Format: {"truth": "Die echte Aussage", "bluffs": ["Blueff1", "Blueff2", "Blueff3"], "correctIndex": 0, "explanation": "Kurze Erklaerung warum die Wahrheit stimmt (max 2 Saetze)."}
-correctIndex ist immer 0 (truth ist Option A). Der Frontend shuffelt die Optionen.`,
-        500
+
+Erstelle ein schwieriges Quiz: Eine echte, nicht-offensichtliche Aussage + drei ueberzeugend klingende Blueffs.
+
+REGELN fuer die WAHRE Aussage (truth):
+- Darf NICHT den Kuenstlernamen, den Songtitel oder das Jahr direkt enthalten – diese sind dem Spieler bereits bekannt!
+- Soll einen nicht-offensichtlichen Fakt nennen: z.B. Chartplatzierung, Produzent, Sample-Quelle, Label, Co-Autor, Musikvideo-Detail, Award, Entstehungsgeschichte, Instrumental-Besonderheit
+- Falls kein spezifischer Fakt bekannt ist: nenne eine echte Aussage zum Genre, zur Stilaera oder zum Musikmarkt des Jahres ${year}
+- Max 20 Woerter, knackig formuliert
+
+REGELN fuer die BLUFFS:
+- Sollen plausibel und verfuehrerisch klingen – nicht sofort als falsch erkennbar
+- Koennen frei erfunden sein, sollen aber wie echte Musik-Facts wirken
+- Kein offensichtlicher Bezug zum Kuenstlernamen oder Songtitel
+
+Format: {"truth": "...", "bluffs": ["...", "...", "..."], "correctIndex": 0, "explanation": "Kurze Erklaerung warum die Wahrheit stimmt (max 2 Saetze)."}
+correctIndex ist immer 0. Das Frontend shuffelt.`,
+        600
       );
 
     // ── Variante 4: Once Upon a Time ──────────────────────────────────
