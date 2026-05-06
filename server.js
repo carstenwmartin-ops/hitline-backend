@@ -22,7 +22,11 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-app.use(express.json());
+// Webhook braucht Raw Body — JSON-Parser nur für alle anderen Routen
+app.use((req, res, next) => {
+  if (req.path === '/api/stripe-webhook') return next();
+  express.json()(req, res, next);
+});
 
 // Hilfsfunktion: Prompt bereinigen (Umlaute etc.)
 const sanitizePrompt = (prompt) => prompt
@@ -490,6 +494,123 @@ Format: {"realSong": {"title": "Echter Titel", "artist": "${artist}", "year": ZA
   } catch (error) {
     console.error(`❌ Crossover Fehler [${variant}]:`, error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// =====================================================================
+// STRIPE: Coin-Pakete kaufen
+// =====================================================================
+const COIN_PACKAGES = [
+  { id: 'coins_50',  coins: 50,  price: 299,  name: '50 Noten',  currency: 'eur' },
+  { id: 'coins_150', coins: 150, price: 699,  name: '150 Noten', currency: 'eur' },
+  { id: 'coins_500', coins: 500, price: 1499, name: '500 Noten', currency: 'eur' },
+];
+
+// Firebase Admin initialisieren (nur wenn Credentials vorhanden)
+let adminDb = null;
+try {
+  const { default: admin } = await import('firebase-admin');
+  if (process.env.FIREBASE_SERVICE_ACCOUNT && !admin.apps.length) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      databaseURL: 'https://hitline-139be-default-rtdb.europe-west1.firebasedatabase.app',
+    });
+    adminDb = admin.database();
+    console.log('🔥 Firebase Admin initialisiert');
+  }
+} catch (e) {
+  console.warn('⚠️ Firebase Admin nicht verfügbar:', e.message);
+}
+
+// POST /api/create-checkout — Stripe Checkout Session erstellen
+app.post('/api/create-checkout', async (req, res) => {
+  const { packageId, uid, successUrl, cancelUrl } = req.body;
+  if (!packageId || !uid) return res.status(400).json({ error: 'packageId und uid erforderlich' });
+
+  const pkg = COIN_PACKAGES.find(p => p.id === packageId);
+  if (!pkg) return res.status(400).json({ error: 'Unbekanntes Paket' });
+
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) return res.status(500).json({ error: 'Stripe nicht konfiguriert' });
+
+  try {
+    const { default: Stripe } = await import('stripe');
+    const stripe = new Stripe(stripeKey);
+
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: pkg.currency,
+          product_data: { name: `Hitline: ${pkg.name}`, description: `${pkg.coins} Noten für Hitline: Songflow` },
+          unit_amount: pkg.price,
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      success_url: successUrl || 'https://hitline-songflow-fri3nds.netlify.app?payment=success',
+      cancel_url: cancelUrl || 'https://hitline-songflow-fri3nds.netlify.app?payment=cancelled',
+      metadata: { uid, packageId, coins: String(pkg.coins) },
+    });
+
+    console.log(`💳 Checkout erstellt: ${pkg.name} für uid=${uid}`);
+    res.json({ url: session.url });
+  } catch (e) {
+    console.error('❌ Stripe Fehler:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/stripe-webhook — Zahlung bestätigen + Coins gutschreiben
+app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) return res.status(500).json({ error: 'Webhook Secret fehlt' });
+
+  let event;
+  try {
+    const { default: Stripe } = await import('stripe');
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+    event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+  } catch (e) {
+    console.error('❌ Webhook Verifikation fehlgeschlagen:', e.message);
+    return res.status(400).send(`Webhook Error: ${e.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const { uid, coins } = session.metadata || {};
+
+    if (!uid || !coins) {
+      console.error('❌ Fehlende Metadata in Session:', session.id);
+      return res.status(400).json({ error: 'Fehlende Metadata' });
+    }
+
+    if (!adminDb) {
+      console.error('❌ Firebase Admin nicht verfügbar');
+      return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    }
+
+    try {
+      const coinsToAdd = parseInt(coins, 10);
+      const profileRef = adminDb.ref(`users/${uid}/profile`);
+      await profileRef.transaction(profile => {
+        if (!profile) return { coins: coinsToAdd, totalEarned: coinsToAdd };
+        return {
+          ...profile,
+          coins: (profile.coins || 0) + coinsToAdd,
+          totalEarned: (profile.totalEarned || 0) + coinsToAdd,
+        };
+      });
+      console.log(`✅ ${coinsToAdd} Coins für uid=${uid} gutgeschrieben`);
+      res.json({ received: true });
+    } catch (e) {
+      console.error('❌ Firebase Schreib-Fehler:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  } else {
+    res.json({ received: true });
   }
 });
 
