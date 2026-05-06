@@ -531,12 +531,30 @@ try {
   console.error('❌ Firebase Admin Init Fehler:', e.message);
 }
 
+// Hilfsfunktion: Pakete aus Firebase laden (oder Fallback)
+const getCoinPackages = async () => {
+  if (adminDb) {
+    try {
+      const snap = await adminDb.ref('config/coinPackages').once('value');
+      const data = snap.val();
+      if (data && Array.isArray(data) && data.length > 0) return data;
+    } catch (e) { /* Fallback */ }
+  }
+  return COIN_PACKAGES;
+};
+
+// GET /api/coin-packages — Pakete für Frontend abrufen
+app.get('/api/coin-packages', async (req, res) => {
+  res.json(await getCoinPackages());
+});
+
 // POST /api/create-checkout — Stripe Checkout Session erstellen
 app.post('/api/create-checkout', async (req, res) => {
   const { packageId, uid, successUrl, cancelUrl } = req.body;
   if (!packageId || !uid) return res.status(400).json({ error: 'packageId und uid erforderlich' });
 
-  const pkg = COIN_PACKAGES.find(p => p.id === packageId);
+  const packages = await getCoinPackages();
+  const pkg = packages.find(p => p.id === packageId);
   if (!pkg) return res.status(400).json({ error: 'Unbekanntes Paket' });
 
   const stripeKey = process.env.STRIPE_SECRET_KEY;
