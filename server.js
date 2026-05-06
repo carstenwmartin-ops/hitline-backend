@@ -510,17 +510,25 @@ const COIN_PACKAGES = [
 let adminDb = null;
 try {
   const { default: admin } = await import('firebase-admin');
-  if (process.env.FIREBASE_SERVICE_ACCOUNT && !admin.apps.length) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  const saRaw = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (saRaw && !admin.apps.length) {
+    console.log('🔥 Firebase Service Account vorhanden, Länge:', saRaw.length);
+    const serviceAccount = JSON.parse(saRaw);
+    // private_key: Render.com kodiert \n manchmal als literal \\n
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
       databaseURL: 'https://hitline-139be-default-rtdb.europe-west1.firebasedatabase.app',
     });
     adminDb = admin.database();
-    console.log('🔥 Firebase Admin initialisiert');
+    console.log('🔥 Firebase Admin initialisiert ✅');
+  } else if (!saRaw) {
+    console.warn('⚠️ FIREBASE_SERVICE_ACCOUNT nicht gesetzt');
   }
 } catch (e) {
-  console.warn('⚠️ Firebase Admin nicht verfügbar:', e.message);
+  console.error('❌ Firebase Admin Init Fehler:', e.message);
 }
 
 // POST /api/create-checkout — Stripe Checkout Session erstellen
