@@ -356,6 +356,31 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Backend läuft' });
 });
 
+// =====================================================================
+// iTunes Proxy — umgeht Browser-seitige 403/Rate-Limit-Probleme
+// GET /api/itunes-search?term=...
+// =====================================================================
+app.get('/api/itunes-search', async (req, res) => {
+  const { term } = req.query;
+  if (!term) return res.status(400).json({ error: 'term required' });
+  try {
+    const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=40`;
+    const response = await fetch(url, {
+      headers: { 'User-Agent': 'HitlineSongflow/1.0' }
+    });
+    if (!response.ok) {
+      console.warn(`iTunes ${response.status} für "${term}"`);
+      return res.json({ results: [] });
+    }
+    const data = await response.json();
+    res.set('Cache-Control', 'public, max-age=3600'); // 1h cachen
+    res.json(data);
+  } catch (e) {
+    console.warn(`iTunes-Proxy Fehler für "${term}":`, e.message);
+    res.json({ results: [] });
+  }
+});
+
 app.get('/api/lastfm-similar', async (req, res) => {
   const { artist } = req.query;
   const lastfmApiKey = process.env.LASTFM_API_KEY;
