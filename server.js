@@ -8,15 +8,15 @@ const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// API Key (einheitlich für alle Routen)
-const apiKey = process.env.ANTHROPIC_API_KEY || process.env.VITE_CLAUDE_API_KEY;
+// API Key (OpenRouter)
+const apiKey = process.env.OPENROUTER_API_KEY;
 
 if (!apiKey) {
-  console.error('❌ API Key nicht gefunden! Setze ANTHROPIC_API_KEY Environment Variable.');
+  console.error('❌ OPENROUTER_API_KEY nicht gefunden!');
   process.exit(1);
 }
 
-console.log('✅ API Key geladen:', apiKey.substring(0, 20) + '...');
+console.log('✅ OpenRouter API Key geladen:', apiKey.substring(0, 20) + '...');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -35,28 +35,31 @@ const sanitizePrompt = (prompt) => prompt
   .replace(/ß/g, 'ss')
   .replace(/[^\x00-\x7F]/g, '');
 
-// Hilfsfunktion: Claude API aufrufen
+// Hilfsfunktion: LLM via OpenRouter aufrufen (OpenAI-kompatibel)
 const callClaude = async (system, userContent, maxTokens = 2000) => {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01'
+      'Authorization': `Bearer ${apiKey}`,
+      'HTTP-Referer': 'https://hitline-songflow-fri3nds.netlify.app',
+      'X-Title': 'Hitline Songflow'
     },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: 'anthropic/claude-sonnet-4-5',
       max_tokens: maxTokens,
-      system,
-      messages: [{ role: 'user', content: userContent }]
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userContent }
+      ]
     })
   });
   if (!response.ok) {
     const err = await response.json();
-    throw new Error(`Claude API ${response.status}: ${JSON.stringify(err)}`);
+    throw new Error(`OpenRouter ${response.status}: ${JSON.stringify(err)}`);
   }
   const data = await response.json();
-  return data.content[0].text
+  return data.choices[0].message.content
     .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 };
 
