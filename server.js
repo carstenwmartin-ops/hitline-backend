@@ -36,7 +36,8 @@ const sanitizePrompt = (prompt) => prompt
   .replace(/[^\x00-\x7F]/g, '');
 
 // Hilfsfunktion: LLM via OpenRouter aufrufen (OpenAI-kompatibel)
-const callClaude = async (system, userContent, maxTokens = 2000) => {
+// temperature optional niedrig ansetzen für faktenkritische Aufgaben (reduziert Halluzinationen)
+const callClaude = async (system, userContent, maxTokens = 2000, temperature) => {
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -48,6 +49,7 @@ const callClaude = async (system, userContent, maxTokens = 2000) => {
     body: JSON.stringify({
       model: 'anthropic/claude-sonnet-4-5',
       max_tokens: maxTokens,
+      ...(temperature !== undefined && { temperature }),
       messages: [
         { role: 'system', content: system },
         { role: 'user', content: userContent }
@@ -405,27 +407,34 @@ app.get('/api/config', (req, res) => {
 // =====================================================================
 // ROUTE: Crossover-Modus — KI-Fakten für One Truth, Once Upon, More Hits
 // =====================================================================
-const callClaudeHaiku = async (system, userContent, maxTokens = 400) => {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+// BUGFIX: rief zuvor direkt api.anthropic.com mit dem OpenRouter-Key auf — schlug dadurch
+// IMMER fehl (falscher Key-Typ für die native Anthropic-API), was den One-Truth-Fallback auf
+// "Quiz" in JEDER Runde auslöste. Jetzt konsistent über OpenRouter wie callClaude().
+const callClaudeHaiku = async (system, userContent, maxTokens = 400, temperature) => {
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01'
+      'Authorization': `Bearer ${apiKey}`,
+      'HTTP-Referer': 'https://hitline-songflow-fri3nds.netlify.app',
+      'X-Title': 'Hitline Songflow'
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5',
+      model: 'anthropic/claude-haiku-4-5',
       max_tokens: maxTokens,
-      system,
-      messages: [{ role: 'user', content: userContent }]
+      ...(temperature !== undefined && { temperature }),
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userContent }
+      ]
     })
   });
   if (!response.ok) {
     const err = await response.json();
-    throw new Error(`Claude API ${response.status}: ${JSON.stringify(err)}`);
+    throw new Error(`OpenRouter ${response.status}: ${JSON.stringify(err)}`);
   }
   const data = await response.json();
-  return data.content[0].text
+  return data.choices[0].message.content
     .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
 };
 
@@ -469,46 +478,51 @@ correctIndex ist immer 0. Das Frontend shuffelt.`,
       const salts = ['A','B','C','D','E','F','G','H'];
       const salt = salts[Math.floor(Math.random() * salts.length)];
       content = await callClaude(
-        'Du bist ein Musik-Historiker mit praezisem Faktenwissen. Antworte NUR mit validem JSON, keine Markdown-Bloecke, kein Text ausserhalb des JSON.',
+        'Du bist ein Musik-Historiker mit praezisem Faktenwissen. Faktentreue hat absolute Prioritaet vor Kreativitaet. Antworte NUR mit validem JSON, keine Markdown-Bloecke, kein Text ausserhalb des JSON.',
         `Jahr: ${year}. Salt: ${salt} (ignorieren, nur fuer Abwechslung).
 
 Erstelle ein Quiz: Welcher Kuenstler hatte in ${year} KEINEN grossen Hit?
 
-DREI echte Hits aus ${year}:
-- Nenne drei Kuenstler/Bands, die in ${year} nachweislich in den Charts waren (Top 40 irgendwo weltweit)
-- Der Song MUSS wirklich aus ${year} stammen – pruefe sorgfaeltig
-- Die Band/der Kuenstler muss ${year} bereits existiert haben (Gruendungsjahr beachten!)
+DREI echte Hits aus ${year} — HOECHSTE FAKTENTREUE ERFORDERLICH:
+- Nenne drei Kuenstler/Bands mit einem Song, der in ${year} NACHWEISLICH in einer grossen, bekannten Hitparade platziert war (z.B. Billboard Hot 100, UK Singles Chart, deutsche Media-Control/GfK-Single-Charts) — keine obskuren Nischen- oder Regionalcharts
+- Waehle nur Songs/Kuenstler, bei denen du dir zu 100% sicher bist. Bist du dir bei einem Fakt nicht absolut sicher, waehle stattdessen einen anderen, dir zweifelsfrei bekannten Song aus ${year}
+- Der Song MUSS wirklich aus dem Jahr ${year} stammen (Erstveroeffentlichung/Charteinstieg), nicht aus einem Nachbarjahr
+- Die Band/der Kuenstler muss ${year} bereits gegruendet/aktiv gewesen sein
 - Gerne aus verschiedenen Genres (Rock, Pop, Soul, Country, Schlager, …) – muss aber nicht
 
 EIN Fake:
 - Ein Kuenstler, der in ${year} KEINEN charterfolgreichen Song hatte
 - Kann eine spaeter beruehmt gewordene Band sein, die ${year} noch nicht existierte oder noch keine Hits hatte
-- Nenne einen echten Song dieses Kuenstlers, aber aus einem anderen Jahr (realYear muss korrekt sein!)
-- KEINE erfundenen Songs oder Jahreszahlen!
+- Nenne einen echten, zweifelsfrei belegten Song dieses Kuenstlers, aber aus einem anderen Jahr (realYear muss exakt korrekt sein!)
+- KEINE erfundenen Songs oder Jahreszahlen! Bei Unsicherheit einen bekannteren Kuenstler/Song waehlen.
 
 Format: {"hits": [{"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}, {"artist": "Name", "song": "Titel", "year": ${year}}], "fake": {"artist": "Name", "song": "Echter Titel dieses Kuenstlers", "realYear": ZAHL}, "explanation": "1 Satz Erklaerung warum der Fake-Kuenstler ${year} keinen Hit hatte."}`,
-        700
+        700,
+        0.2
       );
 
     // ── Variante 5: More Hits — Sonnet für Fakten-Genauigkeit ────────────
     } else if (variant === 'more-hits') {
       content = await callClaude(
-        'Du bist ein Musik-Historiker mit praezisem Faktenwissen. Antworte NUR mit validem JSON, keine Markdown-Bloecke, kein Text ausserhalb des JSON.',
+        'Du bist ein Musik-Historiker mit praezisem Faktenwissen. Faktentreue hat absolute Prioritaet vor Kreativitaet. Antworte NUR mit validem JSON, keine Markdown-Bloecke, kein Text ausserhalb des JSON.',
         `Kuenstler: "${artist}", Song: "${title}" (${year}).
 
 Aufgabe: Welcher Song stammt wirklich von "${artist}"?
 
-ECHTER Song (realSong):
+ECHTER Song (realSong) — HOECHSTE FAKTENTREUE ERFORDERLICH:
 - Ein anderer bekannter, nachweislich existierender Song von "${artist}" – NICHT "${title}"
-- Song und Jahreszahl muessen korrekt sein – nichts erfinden!
+- Song und Jahreszahl muessen exakt korrekt sein – nichts erfinden, keine Verwechslung mit aehnlich klingenden Songs/Kuenstlern
+- Waehle nur einen Song, bei dem du dir zu 100% sicher bist, dass er wirklich von "${artist}" stammt. Bist du dir unsicher, waehle stattdessen einen anderen, dir zweifelsfrei bekannten Song desselben Kuenstlers
 
 DREI Fake-Songs (fakeSongs):
-- Echte, bekannte Songs von ANDEREN Kuenstlern – keine erfundenen Titel
-- Titel und Kuenstler muessen real existieren
-- Jahreszahl des jeweiligen Songs korrekt angeben
+- Echte, bekannte Songs von ANDEREN, tatsaechlich existierenden Kuenstlern – keine erfundenen Titel
+- Titel und Kuenstler muessen real existieren und korrekt zueinander passen (kein Verwechseln von Interpreten)
+- Jahreszahl des jeweiligen Songs exakt korrekt angeben
+- Bei Unsicherheit einen bekannteren, zweifelsfrei belegten Song waehlen statt zu raten
 
 Format: {"realSong": {"title": "Echter Titel", "artist": "${artist}", "year": ZAHL}, "fakeSongs": [{"title": "Echter Titel", "artist": "Anderer Kuenstler", "year": ZAHL}, {"title": "Echter Titel", "artist": "Anderer Kuenstler", "year": ZAHL}, {"title": "Echter Titel", "artist": "Anderer Kuenstler", "year": ZAHL}], "explanation": "1 Satz Erklaerung."}`,
-        600
+        600,
+        0.2
       );
 
     } else {
