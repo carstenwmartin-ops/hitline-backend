@@ -543,9 +543,11 @@ Format: {"realSong": {"title": "Echter Titel", "artist": "${artist}", "year": ZA
 // STRIPE: Coin-Pakete kaufen
 // =====================================================================
 const COIN_PACKAGES = [
-  { id: 'coins_50',  coins: 50,  price: 299,  name: '50 Noten',  currency: 'eur' },
-  { id: 'coins_150', coins: 150, price: 699,  name: '150 Noten', currency: 'eur' },
-  { id: 'coins_500', coins: 500, price: 1499, name: '500 Noten', currency: 'eur' },
+  { id: 'coins_40',  coins: 40,  price: 299,  name: '40 Noten',  currency: 'eur' },
+  { id: 'coins_90',  coins: 90,  price: 599,  name: '90 Noten',  currency: 'eur' },
+  { id: 'coins_150', coins: 150, price: 899,  name: '150 Noten', currency: 'eur' },
+  { id: 'coins_220', coins: 220, price: 1199, name: '220 Noten', currency: 'eur' },
+  { id: 'coins_300', coins: 300, price: 1499, name: '300 Noten', currency: 'eur' },
 ];
 
 // Firebase Admin initialisieren (nur wenn Credentials vorhanden)
@@ -679,6 +681,69 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     }
   } else {
     res.json({ received: true });
+  }
+});
+
+// =====================================================================
+// PROMO-CODES: Einmalige Noten-Gutschrift pro Account
+// =====================================================================
+
+// POST /api/redeem-promo — Promo-Code einlösen
+app.post('/api/redeem-promo', async (req, res) => {
+  const { uid, code } = req.body;
+  if (!uid || !code) return res.status(400).json({ error: 'uid und code erforderlich' });
+  if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+
+  const normalizedCode = String(code).trim().toUpperCase();
+
+  try {
+    const codeRef = adminDb.ref(`config/promoCodes/${normalizedCode}`);
+    const snap = await codeRef.once('value');
+    const promo = snap.val();
+
+    if (!promo || !promo.active) {
+      return res.status(404).json({ error: 'Code ungültig oder nicht mehr aktiv' });
+    }
+    if (promo.expiresAt && Date.now() > promo.expiresAt) {
+      return res.status(400).json({ error: 'Code abgelaufen' });
+    }
+    if (promo.maxRedemptions && (promo.redeemedCount || 0) >= promo.maxRedemptions) {
+      return res.status(400).json({ error: 'Code bereits ausgeschöpft' });
+    }
+
+    const coinsToAdd = promo.coins || 0;
+
+    // Coins gutschreiben + Einlösung markieren — Check-and-Set ATOMAR innerhalb der Transaction,
+    // damit zwei gleichzeitige Anfragen mit demselben Code nicht doppelt gutgeschrieben werden können.
+    let alreadyRedeemed = false;
+    const profileRef = adminDb.ref(`users/${uid}/profile`);
+    await profileRef.transaction(profile => {
+      const p = profile || {};
+      const redeemed = p.redeemedPromoCodes || {};
+      if (redeemed[normalizedCode]) {
+        alreadyRedeemed = true;
+        return; // abbrechen, nichts ändern
+      }
+      return {
+        ...p,
+        coins: (p.coins || 0) + coinsToAdd,
+        totalEarned: (p.totalEarned || 0) + coinsToAdd,
+        redeemedPromoCodes: { ...redeemed, [normalizedCode]: Date.now() },
+      };
+    });
+
+    if (alreadyRedeemed) {
+      return res.status(400).json({ error: 'Code wurde bereits eingelöst' });
+    }
+
+    // Globalen Einlösungszähler erhöhen (unkritisch, kein exaktes Atomic-Cap nötig)
+    await codeRef.child('redeemedCount').transaction(n => (n || 0) + 1);
+
+    console.log(`🎁 Promo-Code ${normalizedCode} eingelöst von uid=${uid} (+${coinsToAdd} Noten)`);
+    res.json({ success: true, coinsAdded: coinsToAdd });
+  } catch (e) {
+    console.error('❌ Promo-Code Fehler:', e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
