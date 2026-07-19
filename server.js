@@ -43,8 +43,8 @@ const callClaude = async (system, userContent, maxTokens = 2000, temperature) =>
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
-      'HTTP-Referer': 'https://hitline-songflow-fri3nds.netlify.app',
-      'X-Title': 'Hitline Songflow'
+      'HTTP-Referer': 'https://hitlines-song2flow-fri3nds.netlify.app',
+      'X-Title': 'Hitlines Songflow'
     },
     body: JSON.stringify({
       model: 'anthropic/claude-sonnet-4-5',
@@ -416,8 +416,8 @@ const callClaudeHaiku = async (system, userContent, maxTokens = 400, temperature
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
-      'HTTP-Referer': 'https://hitline-songflow-fri3nds.netlify.app',
-      'X-Title': 'Hitline Songflow'
+      'HTTP-Referer': 'https://hitlines-song2flow-fri3nds.netlify.app',
+      'X-Title': 'Hitlines Songflow'
     },
     body: JSON.stringify({
       model: 'anthropic/claude-haiku-4-5',
@@ -613,14 +613,14 @@ app.post('/api/create-checkout', async (req, res) => {
       line_items: [{
         price_data: {
           currency: pkg.currency,
-          product_data: { name: `Hitline: ${pkg.name}`, description: `${pkg.coins} Noten für Hitline: Songflow` },
+          product_data: { name: `Hitlines: ${pkg.name}`, description: `${pkg.coins} Noten für Hitlines: Songflow` },
           unit_amount: pkg.price,
         },
         quantity: 1,
       }],
       mode: 'payment',
-      success_url: successUrl || 'https://hitline-songflow-fri3nds.netlify.app?payment=success',
-      cancel_url: cancelUrl || 'https://hitline-songflow-fri3nds.netlify.app?payment=cancelled',
+      success_url: successUrl || 'https://hitlines-song2flow-fri3nds.netlify.app?payment=success',
+      cancel_url: cancelUrl || 'https://hitlines-song2flow-fri3nds.netlify.app?payment=cancelled',
       metadata: { uid, packageId, coins: String(pkg.coins) },
     });
 
