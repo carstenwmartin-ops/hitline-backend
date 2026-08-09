@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import jwt from 'jsonwebtoken';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -383,6 +384,52 @@ app.get('/api/itunes-search', async (req, res) => {
   } catch (e) {
     console.warn(`iTunes-Proxy Fehler für "${term}":`, e.message);
     res.json({ results: [] });
+  }
+});
+
+// =====================================================================
+// MusicKit Developer Token — signiertes JWT fuer Apples Catalog Search API
+// GET /api/musickit-token
+//
+// Das Token ist kein dauerhaftes Geheimnis (kurzlebiger Bearer-JWT nur fuer
+// Katalog-Lesezugriffe), wird aber serverseitig signiert, weil der private
+// Schluessel (.p8, ES256) nie im Client landen darf. Einmal signiert, bis kurz
+// vor Ablauf im Prozessspeicher gecacht statt bei jeder Anfrage neu zu signieren.
+// =====================================================================
+let _musicKitTokenCache = { token: null, expiresAt: 0 };
+
+const getMusicKitToken = () => {
+  const now = Date.now();
+  // Noch > 24h gueltig? Cache verwenden.
+  if (_musicKitTokenCache.token && _musicKitTokenCache.expiresAt - now > 24 * 60 * 60 * 1000) {
+    return _musicKitTokenCache.token;
+  }
+  const teamId = process.env.APPLE_TEAM_ID;
+  const keyId = process.env.APPLE_MUSICKIT_KEY_ID;
+  const privateKeyRaw = process.env.APPLE_MUSICKIT_PRIVATE_KEY;
+  if (!teamId || !keyId || !privateKeyRaw) {
+    throw new Error('APPLE_TEAM_ID/APPLE_MUSICKIT_KEY_ID/APPLE_MUSICKIT_PRIVATE_KEY fehlen');
+  }
+  const privateKey = privateKeyRaw.replace(/\\n/g, '\n');
+  const expiresInSeconds = 180 * 24 * 60 * 60; // 180 Tage — sicher unter Apples 6-Monats-Maximum
+  const token = jwt.sign({}, privateKey, {
+    algorithm: 'ES256',
+    keyid: keyId,
+    issuer: teamId,
+    expiresIn: expiresInSeconds,
+  });
+  _musicKitTokenCache = { token, expiresAt: now + expiresInSeconds * 1000 };
+  return token;
+};
+
+app.get('/api/musickit-token', (req, res) => {
+  try {
+    const token = getMusicKitToken();
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.json({ token });
+  } catch (e) {
+    console.error('MusicKit-Token Fehler:', e.message);
+    res.status(500).json({ error: 'token unavailable' });
   }
 });
 
