@@ -708,20 +708,6 @@ const sendApplePush = (deviceToken, { title, body }) => new Promise((resolve, re
   req.end();
 });
 
-// TEMPORAER — nur zum Verifizieren des APNs-Setups ohne echtes Geraet, wird
-// direkt nach dem Test wieder entfernt. Schickt an einen syntaktisch gueltigen,
-// aber erfundenen Device-Token; Apples strukturierte Fehlerantwort (statt eines
-// TLS-/Auth-Fehlers) beweist, dass Key/Team-ID/Key-ID korrekt konfiguriert sind.
-app.get('/api/debug-apns-test', async (req, res) => {
-  try {
-    const fakeToken = 'a'.repeat(64);
-    const result = await sendApplePush(fakeToken, { title: 'Debug', body: 'Test' });
-    res.json(result);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // POST /api/send-push — { uid, title, body }
 app.post('/api/send-push', async (req, res) => {
   const { uid, title, body } = req.body || {};
