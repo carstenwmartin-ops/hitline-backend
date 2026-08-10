@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
+import http2 from 'http2';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
@@ -621,6 +622,111 @@ try {
 } catch (e) {
   console.error('❌ Firebase Admin Init Fehler:', e.message);
 }
+
+// =====================================================================
+// APNs Push Notifications — signiertes Provider-JWT + HTTP/2-Versand
+// POST /api/send-push
+//
+// Device-Tokens werden vom Client bei users/{uid}/profile.pushToken abgelegt
+// (siehe App.jsx PushNotifications.addListener('registration', ...)). Dieser
+// Endpunkt ist der generische Baustein zum tatsaechlichen Versenden — welche
+// Ereignisse eine Push ausloesen (z.B. Multiplayer-Einladung, neue Themen),
+// ist noch nicht verdrahtet und folgt als eigener Schritt.
+//
+// Provider-Token ist anders als der MusicKit-Token kurzlebig (Apple: max. 1h
+// gueltig, Neuerstellung max. alle ~20min empfohlen) — daher kuerzeres Caching.
+// APNs erfordert zwingend HTTP/2 (kein HTTP/1.1), daher Node's eingebautes
+// http2-Modul statt fetch().
+// =====================================================================
+let _apnsTokenCache = { token: null, expiresAt: 0 };
+
+const getApnsProviderToken = () => {
+  const now = Date.now();
+  if (_apnsTokenCache.token && _apnsTokenCache.expiresAt - now > 5 * 60 * 1000) {
+    return _apnsTokenCache.token;
+  }
+  const teamId = process.env.APPLE_TEAM_ID;
+  const keyId = process.env.APPLE_PUSH_KEY_ID;
+  const privateKeyRaw = process.env.APPLE_PUSH_PRIVATE_KEY;
+  if (!teamId || !keyId || !privateKeyRaw) {
+    throw new Error('APPLE_TEAM_ID/APPLE_PUSH_KEY_ID/APPLE_PUSH_PRIVATE_KEY fehlen');
+  }
+  const privateKey = privateKeyRaw.replace(/\\n/g, '\n');
+  const expiresInSeconds = 50 * 60; // 50 Minuten — unter Apples 1h-Maximum
+  const token = jwt.sign({ iss: teamId, iat: Math.floor(now / 1000) }, privateKey, {
+    algorithm: 'ES256',
+    keyid: keyId,
+  });
+  _apnsTokenCache = { token, expiresAt: now + expiresInSeconds * 1000 };
+  return token;
+};
+
+// Sandbox (Xcode-Debug-Builds/TestFlight-Entwicklung) vs. Production (App
+// Store) sind bei APNs getrennte Endpunkte — der Key selbst deckt laut
+// Portal-Konfiguration beide ab, die Umgebung wird hier ueber eine Env-Var
+// gewaehlt, bis die App tatsaechlich im App Store ist (dann auf 'production'
+// umstellen).
+const sendApplePush = (deviceToken, { title, body }) => new Promise((resolve, reject) => {
+  const host = process.env.APNS_ENVIRONMENT === 'production'
+    ? 'https://api.push.apple.com'
+    : 'https://api.sandbox.push.apple.com';
+  const bundleId = process.env.APPLE_BUNDLE_ID || 'com.hitlines.songflow';
+
+  let providerToken;
+  try {
+    providerToken = getApnsProviderToken();
+  } catch (e) {
+    reject(e);
+    return;
+  }
+
+  const client = http2.connect(host);
+  client.on('error', reject);
+
+  const req = client.request({
+    ':method': 'POST',
+    ':path': `/3/device/${deviceToken}`,
+    'authorization': `bearer ${providerToken}`,
+    'apns-topic': bundleId,
+    'apns-push-type': 'alert',
+    'content-type': 'application/json',
+  });
+
+  let responseBody = '';
+  let statusCode = null;
+  req.setEncoding('utf8');
+  req.on('response', (headers) => { statusCode = headers[':status']; });
+  req.on('data', (chunk) => { responseBody += chunk; });
+  req.on('end', () => {
+    client.close();
+    if (statusCode === 200) resolve({ success: true });
+    else resolve({ success: false, status: statusCode, error: responseBody });
+  });
+  req.on('error', (err) => { client.close(); reject(err); });
+
+  req.write(JSON.stringify({ aps: { alert: { title, body }, sound: 'default' } }));
+  req.end();
+});
+
+// POST /api/send-push — { uid, title, body }
+app.post('/api/send-push', async (req, res) => {
+  const { uid, title, body } = req.body || {};
+  if (!uid || !title || !body) return res.status(400).json({ error: 'uid, title und body erforderlich' });
+  if (!adminDb) return res.status(500).json({ error: 'Firebase Admin nicht konfiguriert' });
+
+  try {
+    const snap = await adminDb.ref(`users/${uid}/profile/pushToken`).once('value');
+    const deviceToken = snap.val();
+    if (!deviceToken) return res.status(404).json({ error: 'Kein Push-Token fuer diesen Nutzer hinterlegt' });
+
+    const result = await sendApplePush(deviceToken, { title, body });
+    if (result.success) return res.json({ success: true });
+    return res.status(502).json({ error: 'APNs lehnte die Zustellung ab', status: result.status, detail: result.error });
+  } catch (e) {
+    console.error('❌ Push-Versand Fehler:', e.message);
+    res.status(500).json({ error: 'Push-Versand fehlgeschlagen' });
+  }
+});
 
 // Hilfsfunktion: Pakete aus Firebase laden (oder Fallback)
 const getCoinPackages = async () => {
