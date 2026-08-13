@@ -837,6 +837,79 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   }
 });
 
+// POST /api/revenuecat-webhook — In-App-Kauf (iOS/Android) bestätigen + Coins gutschreiben
+// Auth per Authorization-Header (im RevenueCat-Dashboard selbst festgelegter Wert),
+// kein HMAC noetig wie bei Stripe — RevenueCat sendet den Header-Wert 1:1 mit.
+app.post('/api/revenuecat-webhook', async (req, res) => {
+  const authHeader = req.headers['authorization'];
+  const webhookSecret = process.env.REVENUECAT_WEBHOOK_SECRET;
+  if (!webhookSecret) return res.status(500).json({ error: 'Webhook Secret fehlt' });
+  if (authHeader !== webhookSecret) {
+    console.error('❌ RevenueCat-Webhook: ungültiger Authorization-Header');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const event = req.body?.event;
+  if (!event || event.type !== 'NON_RENEWING_PURCHASE') {
+    // Andere Event-Typen (Abo-Lifecycle etc.) betreffen uns nicht — quittieren und ignorieren.
+    return res.json({ received: true });
+  }
+
+  const uid = event.app_user_id;
+  const productId = event.product_id;
+  const transactionId = event.transaction_id || event.id;
+  if (!uid || !productId) {
+    console.error('❌ RevenueCat-Webhook: fehlende uid/product_id im Event');
+    return res.status(400).json({ error: 'Fehlende Event-Daten' });
+  }
+
+  const packages = await getCoinPackages();
+  const pkg = packages.find(p => p.id === productId);
+  if (!pkg) {
+    console.error(`❌ RevenueCat-Webhook: unbekannte product_id "${productId}"`);
+    return res.status(400).json({ error: 'Unbekanntes Produkt' });
+  }
+
+  if (!adminDb) {
+    console.error('❌ Firebase Admin nicht verfügbar');
+    return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+  }
+
+  try {
+    const coinsToAdd = pkg.coins;
+    const profileRef = adminDb.ref(`users/${uid}/profile`);
+    let alreadyProcessed = false;
+    await profileRef.transaction(profile => {
+      // RevenueCat stellt Events at-least-once zu — dieselbe Kauf-Transaktion kann
+      // mehrfach ankommen. transaction_id gegen bereits verarbeitete IDs prüfen,
+      // damit dieselbe Zahlung nicht doppelt gutgeschrieben wird (anders als beim
+      // Stripe-Webhook, wo Redelivery in der Praxis kein Problem war).
+      const processed = profile?.processedRevenueCatTransactions || {};
+      if (transactionId && processed[transactionId]) {
+        alreadyProcessed = true;
+        return profile; // unverändert lassen
+      }
+      const nextProcessed = transactionId ? { ...processed, [transactionId]: true } : processed;
+      if (!profile) return { coins: coinsToAdd, totalEarned: coinsToAdd, processedRevenueCatTransactions: nextProcessed };
+      return {
+        ...profile,
+        coins: (profile.coins || 0) + coinsToAdd,
+        totalEarned: (profile.totalEarned || 0) + coinsToAdd,
+        processedRevenueCatTransactions: nextProcessed,
+      };
+    });
+    if (alreadyProcessed) {
+      console.log(`↩️ RevenueCat-Webhook: Transaktion ${transactionId} bereits verarbeitet, übersprungen`);
+    } else {
+      console.log(`✅ ${coinsToAdd} Coins (RevenueCat) für uid=${uid} gutgeschrieben`);
+    }
+    res.json({ received: true });
+  } catch (e) {
+    console.error('❌ Firebase Schreib-Fehler (RevenueCat-Webhook):', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // =====================================================================
 // PROMO-CODES: Einmalige Noten-Gutschrift pro Account
 // =====================================================================
