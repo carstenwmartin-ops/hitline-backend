@@ -592,9 +592,9 @@ Format: {"realSong": {"title": "Echter Titel", "artist": "${artist}", "year": ZA
 // =====================================================================
 const COIN_PACKAGES = [
   { id: 'coins_40',  coins: 40,  price: 299,  name: '40 Noten',  currency: 'eur' },
-  { id: 'coins_90',  coins: 90,  price: 599,  name: '90 Noten',  currency: 'eur' },
+  { id: 'coins_90_v2',  coins: 90,  price: 599,  name: '90 Noten',  currency: 'eur' },
   { id: 'coins_150', coins: 150, price: 899,  name: '150 Noten', currency: 'eur' },
-  { id: 'coins_220', coins: 220, price: 1199, name: '220 Noten', currency: 'eur' },
+  { id: 'coins_220', coins: 220, price: 1299, name: '220 Noten', currency: 'eur' },
   { id: 'coins_300', coins: 300, price: 1499, name: '300 Noten', currency: 'eur' },
 ];
 
