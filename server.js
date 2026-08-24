@@ -994,9 +994,19 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     if (!uid || !adminDb) return res.json({ received: true });
 
     try {
+      const ref = adminDb.ref(`users/${uid}/profile/premiumSubscription`);
+      const existing = (await ref.once('value')).val();
+      // Falls der Kunde (z.B. durch den fruehereren Doppel-Abo-Bug) mehrere Subscriptions
+      // hatte: nur die Kuendigung der Subscription anwenden, die aktuell als "die aktive"
+      // hinterlegt ist. Sonst wuerde das Kuendigen einer alten Karteileiche faelschlich ein
+      // noch aktives, anderes Abo desselben Kunden verdecken.
+      if (existing?.stripeSubscriptionId && existing.stripeSubscriptionId !== sub.id) {
+        console.log(`⏭️ Kuendigungs-Event fuer alte/andere Subscription ignoriert: uid=${uid}, event-sub=${sub.id}, aktuell hinterlegt=${existing.stripeSubscriptionId}`);
+        return res.json({ received: true });
+      }
       // Gesperrt statt gelöscht: bestehende Premium-Playlist-Einträge im Setlist Studio
       // bleiben sichtbar, nur der Spielstart mit ihnen wird ab jetzt wieder blockiert.
-      await adminDb.ref(`users/${uid}/profile/premiumSubscription`).update({
+      await ref.update({
         status: 'canceled',
         willRenew: false,
         lastEventCreated: event.created,
