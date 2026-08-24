@@ -264,37 +264,16 @@ app.post('/api/hitline-playlist-similar', async (req, res) => {
 
       const seedsFormatted = cleanSeeds.join(', ');
 
-      const requestBody = {
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2000,
-        system: 'Du bist ein Musik-Experte. Erstelle eine Liste von Kuenstlern als JSON-Objekt. WICHTIG: Antworte NUR mit JSON, keine Markdown-Bloecke! Format: {"artists": ["Kuenstler1", "Kuenstler2"]}. Gib NUR Kuenstlernamen zurueck, KEINE Song-Titel. Waehle bekannte, unterschiedliche Kuenstler. KEINE Duplikate!',
-        messages: [{
-          role: 'user',
-          content: `Erstelle eine Liste mit ${currentBatchSize} Kuenstlern die klanglich aehnlich sind wie: ${seedsFormatted}
+      const responseText = await callClaude(
+        'Du bist ein Musik-Experte. Erstelle eine Liste von Kuenstlern als JSON-Objekt. WICHTIG: Antworte NUR mit JSON, keine Markdown-Bloecke! Format: {"artists": ["Kuenstler1", "Kuenstler2"]}. Gib NUR Kuenstlernamen zurueck, KEINE Song-Titel. Waehle bekannte, unterschiedliche Kuenstler. KEINE Duplikate!',
+        `Erstelle eine Liste mit ${currentBatchSize} Kuenstlern die klanglich aehnlich sind wie: ${seedsFormatted}
 
 Die Kuenstler sollen:
 - Aehnlichen Stil, Genre oder Sound haben wie die genannten Kuenstler
 - Real und bekannt sein (auf Streamingdiensten verfuegbar)
 - Abwechslungsreich sein (nicht nur sehr offensichtliche Aehnlichkeiten)
 - Die Seed-Kuenstler selbst NICHT enthalten${excludeList}`
-        }]
-      };
-
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify(requestBody)
-      });
-
-      if (!response.ok) throw new Error(`Claude API ${response.status}`);
-
-      const claudeData = await response.json();
-      let responseText = claudeData.content[0].text
-        .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      );
 
       let parsed;
       try {
@@ -785,6 +764,133 @@ app.post('/api/create-checkout', async (req, res) => {
   }
 });
 
+// =====================================================================
+// STRIPE: Hitlines Premium (Apple Music Premium Playlists) — Abo
+// =====================================================================
+// Reverse-Lookup Stripe-Customer-ID -> Firebase-uid. Noetig, weil die
+// Subscription-Lifecycle-Events (customer.subscription.*) keine Checkout-
+// Session-Metadata mehr mittragen, nur Customer-/Subscription-ID.
+const linkStripeCustomer = async (customerId, uid) => {
+  if (!adminDb || !customerId || !uid) return;
+  await adminDb.ref(`stripeCustomerLinks/${customerId}`).set(uid);
+};
+
+const resolveUidByStripeCustomer = async (customerId) => {
+  if (!adminDb || !customerId) return null;
+  const snap = await adminDb.ref(`stripeCustomerLinks/${customerId}`).once('value');
+  return snap.val();
+};
+
+const PREMIUM_PRICE_IDS = {
+  monthly: () => process.env.STRIPE_PRICE_MONTHLY,
+  yearly: () => process.env.STRIPE_PRICE_YEARLY,
+};
+
+// POST /api/create-subscription-checkout — Stripe Checkout Session fürs Abo erstellen
+app.post('/api/create-subscription-checkout', async (req, res) => {
+  const { plan, uid, email, successUrl, cancelUrl } = req.body || {};
+  if (!plan || !uid) return res.status(400).json({ error: 'plan und uid erforderlich' });
+
+  const priceId = PREMIUM_PRICE_IDS[plan]?.();
+  if (!priceId) return res.status(400).json({ error: 'Unbekannter oder nicht konfigurierter Plan' });
+
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) return res.status(500).json({ error: 'Stripe nicht konfiguriert' });
+  if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+
+  try {
+    const { default: Stripe } = await import('stripe');
+    const stripe = new Stripe(stripeKey);
+
+    // Bestehenden Stripe-Customer für diesen uid wiederverwenden statt jedes Mal neu
+    // anzulegen — wichtig fürs Billing Portal und für spätere Plan-Wechsel.
+    const existingSnap = await adminDb.ref(`users/${uid}/profile/premiumSubscription/stripeCustomerId`).once('value');
+    let customerId = existingSnap.val();
+    if (!customerId) {
+      const customer = await stripe.customers.create({ email: email || undefined, metadata: { uid } });
+      customerId = customer.id;
+      await linkStripeCustomer(customerId, uid);
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      line_items: [{ price: priceId, quantity: 1 }],
+      mode: 'subscription',
+      success_url: successUrl || 'https://hitlines-song2flow-fri3nds.netlify.app?subscription=success',
+      cancel_url: cancelUrl || 'https://hitlines-song2flow-fri3nds.netlify.app?subscription=cancelled',
+      metadata: { uid },
+      subscription_data: { metadata: { uid } },
+    });
+
+    console.log(`💳 Abo-Checkout erstellt: ${plan} für uid=${uid}`);
+    res.json({ url: session.url });
+  } catch (e) {
+    console.error('❌ Stripe Abo-Checkout Fehler:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/create-billing-portal-session — Stripe Customer Portal (Kündigung/Zahlungsmethode).
+// Erfüllt die §312k-BGB-Pflicht zum leicht auffindbaren Kündigungsbutton über Stripes
+// gehostete Oberfläche, ohne ein eigenes Kündigungs-UI bauen zu müssen.
+app.post('/api/create-billing-portal-session', async (req, res) => {
+  const { uid, returnUrl } = req.body || {};
+  if (!uid) return res.status(400).json({ error: 'uid erforderlich' });
+  if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+
+  const stripeKey = process.env.STRIPE_SECRET_KEY;
+  if (!stripeKey) return res.status(500).json({ error: 'Stripe nicht konfiguriert' });
+
+  try {
+    const snap = await adminDb.ref(`users/${uid}/profile/premiumSubscription/stripeCustomerId`).once('value');
+    const customerId = snap.val();
+    if (!customerId) return res.status(404).json({ error: 'Kein Stripe-Kunde für diesen Nutzer gefunden' });
+
+    const { default: Stripe } = await import('stripe');
+    const stripe = new Stripe(stripeKey);
+    const portalSession = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: returnUrl || 'https://hitlines-song2flow-fri3nds.netlify.app',
+    });
+    res.json({ url: portalSession.url });
+  } catch (e) {
+    console.error('❌ Billing Portal Fehler:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/grant-complimentary — Familien-Befreiung vom Abo-Zwang (Admin-only).
+// Client schickt sein Firebase-ID-Token mit; wird hier serverseitig verifiziert und auf
+// die Admin-E-Mail geprüft (identische Regel wie die bestehenden Security-Rules für
+// config/themes) — clientseitiges Schreiben auf ein fremdes users/{uid}/profile ist laut
+// database.rules.json nicht erlaubt, daher zwingend über einen Admin-SDK-Endpoint.
+app.post('/api/admin/grant-complimentary', async (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: 'email erforderlich' });
+
+  try {
+    const { default: admin } = await import('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    if (decoded.email !== 'carstenwmartin@gmail.com') {
+      return res.status(403).json({ error: 'Nicht berechtigt' });
+    }
+    const targetUser = await admin.auth().getUserByEmail(email);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    await adminDb.ref(`users/${targetUser.uid}/profile`).update({ appleMusicComplimentary: true });
+    console.log(`🎁 Komplementär-Zugriff gewährt: ${email} (uid=${targetUser.uid})`);
+    res.json({ success: true, uid: targetUser.uid });
+  } catch (e) {
+    console.error('❌ grant-complimentary Fehler:', e.message);
+    if (e.code === 'auth/user-not-found') return res.status(404).json({ error: 'Kein Nutzer mit dieser E-Mail gefunden' });
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
 // POST /api/stripe-webhook — Zahlung bestätigen + Coins gutschreiben
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
@@ -803,6 +909,16 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
+
+    // Abo-Checkout: der eigentliche Status kommt gleich per customer.subscription.created
+    // nach — hier reicht es, den Customer-Link sicherzustellen (falls create-subscription-
+    // checkout ihn aus irgendeinem Grund noch nicht gesetzt hat). Kein Coins-Metadata-Pfad.
+    if (session.mode === 'subscription') {
+      const { uid } = session.metadata || {};
+      if (uid && session.customer) await linkStripeCustomer(session.customer, uid);
+      return res.json({ received: true });
+    }
+
     const { uid, coins } = session.metadata || {};
 
     if (!uid || !coins) {
@@ -832,6 +948,63 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
       console.error('❌ Firebase Schreib-Fehler:', e.message);
       res.status(500).json({ error: e.message });
     }
+  } else if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated') {
+    const sub = event.data.object;
+    const uid = sub.metadata?.uid || await resolveUidByStripeCustomer(sub.customer);
+    if (!uid || !adminDb) return res.json({ received: true });
+
+    try {
+      const ref = adminDb.ref(`users/${uid}/profile/premiumSubscription`);
+      const existing = (await ref.once('value')).val();
+      // Wächter gegen außer-der-Reihe zugestellte/verspätete Webhooks — nicht mit einem
+      // älteren Ereignis einen bereits neueren Stand überschreiben.
+      if (existing?.lastEventCreated && event.created <= existing.lastEventCreated) {
+        return res.json({ received: true });
+      }
+      await ref.set({
+        status: sub.status,
+        provider: 'stripe',
+        priceId: sub.items?.data?.[0]?.price?.id || null,
+        currentPeriodEnd: sub.current_period_end ? sub.current_period_end * 1000 : null,
+        willRenew: !sub.cancel_at_period_end,
+        billingIssue: sub.status === 'past_due',
+        stripeCustomerId: sub.customer,
+        stripeSubscriptionId: sub.id,
+        lastEventCreated: event.created,
+      });
+      console.log(`✅ Abo-Status aktualisiert: uid=${uid} status=${sub.status}`);
+      res.json({ received: true });
+    } catch (e) {
+      console.error('❌ Abo-Sync Fehler:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  } else if (event.type === 'customer.subscription.deleted') {
+    const sub = event.data.object;
+    const uid = sub.metadata?.uid || await resolveUidByStripeCustomer(sub.customer);
+    if (!uid || !adminDb) return res.json({ received: true });
+
+    try {
+      // Gesperrt statt gelöscht: bestehende Premium-Playlist-Einträge im Setlist Studio
+      // bleiben sichtbar, nur der Spielstart mit ihnen wird ab jetzt wieder blockiert.
+      await adminDb.ref(`users/${uid}/profile/premiumSubscription`).update({
+        status: 'canceled',
+        willRenew: false,
+        lastEventCreated: event.created,
+      });
+      console.log(`🔒 Abo beendet/gekündigt: uid=${uid}`);
+      res.json({ received: true });
+    } catch (e) {
+      console.error('❌ Abo-Sync Fehler:', e.message);
+      res.status(500).json({ error: e.message });
+    }
+  } else if (event.type === 'invoice.payment_failed') {
+    const invoice = event.data.object;
+    const uid = await resolveUidByStripeCustomer(invoice.customer);
+    if (uid && adminDb) {
+      await adminDb.ref(`users/${uid}/profile/premiumSubscription`).update({ billingIssue: true }).catch(() => {});
+      console.warn(`⚠️ Abo-Zahlung fehlgeschlagen: uid=${uid}`);
+    }
+    res.json({ received: true });
   } else {
     res.json({ received: true });
   }
