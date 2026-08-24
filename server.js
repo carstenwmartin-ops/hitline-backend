@@ -810,6 +810,16 @@ app.post('/api/create-subscription-checkout', async (req, res) => {
       const customer = await stripe.customers.create({ email: email || undefined, metadata: { uid } });
       customerId = customer.id;
       await linkStripeCustomer(customerId, uid);
+    } else {
+      // Verhindert doppelte Abos für denselben Kunden — Stripe erlaubt technisch beliebig
+      // viele parallele Subscriptions pro Customer, das wuerde hier aber zu doppelter
+      // Abrechnung fuehren. status:'all' + manuelle Filterung, da die List-API keine
+      // Mehrfachauswahl von Status in einem Aufruf unterstuetzt.
+      const existingSubs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
+      const stillRelevant = existingSubs.data.some(s => ['active', 'trialing', 'past_due', 'unpaid'].includes(s.status));
+      if (stillRelevant) {
+        return res.status(409).json({ error: 'already_subscribed' });
+      }
     }
 
     const session = await stripe.checkout.sessions.create({
