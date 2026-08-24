@@ -965,12 +965,14 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
     try {
       const ref = adminDb.ref(`users/${uid}/profile/premiumSubscription`);
-      const existing = (await ref.once('value')).val();
-      // Wächter gegen außer-der-Reihe zugestellte/verspätete Webhooks — nicht mit einem
-      // älteren Ereignis einen bereits neueren Stand überschreiben.
-      if (existing?.lastEventCreated && event.created <= existing.lastEventCreated) {
-        return res.json({ received: true });
-      }
+      // Kein lastEventCreated-Wächter mehr hier (frühere Version blockierte damit auch
+      // manuelle Webhook-Resends aus dem Stripe-Dashboard — ein erneut zugestelltes Event
+      // behält seinen ursprünglichen, alten event.created-Zeitstempel bei, sah für den
+      // Wächter also fälschlich wie ein verspätetes altes Event aus und wurde ignoriert.
+      // Der eigentliche Grund für den Wächter — mehrere parallele Subscriptions desselben
+      // Kunden — ist inzwischen durch den 409-Schutz in create-subscription-checkout an der
+      // Quelle verhindert; für den verbleibenden Deleted-Fall schützt stattdessen der
+      // sub.id-Abgleich weiter unten.
       await ref.set({
         status: sub.status,
         provider: 'stripe',
