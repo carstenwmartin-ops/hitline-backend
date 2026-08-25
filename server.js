@@ -901,6 +901,54 @@ app.post('/api/admin/grant-complimentary', async (req, res) => {
   }
 });
 
+// POST /api/account/delete — Konto vollständig löschen (Apple Guideline 5.1.1(v) / DSGVO Art. 17).
+// Jeder eingeloggte Nutzer darf nur sein EIGENES Konto löschen — uid kommt ausschließlich aus dem
+// verifizierten ID-Token, niemals aus dem Request-Body (sonst könnte ein Nutzer fremde Konten löschen).
+// Reihenfolge bewusst: erst Stripe-Abo kündigen (sonst zahlt der Nutzer nach Löschung weiter, ohne
+// Zugriff auf die App zu haben, um es selbst zu kündigen), dann Firebase-Daten, zuletzt der Auth-User
+// selbst (erst nach erfolgreichem Datenaufräumen — verifyIdToken würde sonst bei einem Retry ins Leere laufen).
+app.post('/api/account/delete', async (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+
+  try {
+    const { default: admin } = await import('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+
+    if (adminDb) {
+      const customerId = (await adminDb.ref(`users/${uid}/profile/premiumSubscription/stripeCustomerId`).once('value')).val();
+      const subscriptionId = (await adminDb.ref(`users/${uid}/profile/premiumSubscription/stripeSubscriptionId`).once('value')).val();
+      const stripeKey = process.env.STRIPE_SECRET_KEY;
+
+      if (subscriptionId && stripeKey) {
+        try {
+          const { default: Stripe } = await import('stripe');
+          const stripe = new Stripe(stripeKey);
+          await stripe.subscriptions.cancel(subscriptionId);
+          console.log(`🗑️ Abo ${subscriptionId} wegen Konto-Löschung gekündigt (uid=${uid})`);
+        } catch (e) {
+          // Abo evtl. schon gekündigt/ausgelaufen — Löschung trotzdem fortsetzen
+          console.warn(`⚠️ Abo-Kündigung bei Konto-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
+        }
+      }
+
+      if (customerId) {
+        await adminDb.ref(`stripeCustomerLinks/${customerId}`).remove();
+      }
+      await adminDb.ref(`users/${uid}`).remove();
+    }
+
+    await admin.auth().deleteUser(uid);
+    console.log(`🗑️ Konto gelöscht: uid=${uid}`);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('❌ Konto-Löschung Fehler:', e.message);
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
 // POST /api/stripe-webhook — Zahlung bestätigen + Coins gutschreiben
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
