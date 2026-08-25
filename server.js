@@ -577,6 +577,11 @@ const COIN_PACKAGES = [
   { id: 'coins_300', coins: 300, price: 1499, name: '300 Noten', currency: 'eur' },
 ];
 
+// Hitlines-Premium-Abo-Produkte im Store (iOS/Android) — muss 1:1 mit den productId-Werten in
+// src/data/premiumSubscription.js (Frontend) sowie den tatsaechlich in App Store Connect/Play
+// Console angelegten Abo-Produkten uebereinstimmen.
+const PREMIUM_SUBSCRIPTION_PRODUCT_IDS = ['hitlines_premium_monthly', 'hitlines_premium_yearly'];
+
 // Firebase Admin initialisieren (nur wenn Credentials vorhanden)
 let adminDb = null;
 try {
@@ -1080,9 +1085,58 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   }
 });
 
-// POST /api/revenuecat-webhook — In-App-Kauf (iOS/Android) bestätigen + Coins gutschreiben
-// Auth per Authorization-Header (im RevenueCat-Dashboard selbst festgelegter Wert),
-// kein HMAC noetig wie bei Stripe — RevenueCat sendet den Header-Wert 1:1 mit.
+// RevenueCat-Abo-Events (Hitlines Premium, iOS/Android) → dasselbe Firebase-Schema wie der
+// Stripe-Webhook (users/{uid}/profile.premiumSubscription), damit hasAppleMusicPremiumAccess()
+// im Frontend providerunabhaengig funktioniert. CANCELLATION heisst bei Apple/RevenueCat nur
+// "Auto-Renew aus" — der Nutzer behaelt Zugriff bis currentPeriodEnd, deshalb bleibt status
+// dabei 'active' und nur willRenew wird false. Erst EXPIRATION (nach Ablauf der Laufzeit) setzt
+// status auf 'canceled', analog zu Stripes customer.subscription.deleted. app_user_id ist direkt
+// die Firebase-uid (siehe ensureRevenueCatConfigured im Frontend) — kein Reverse-Lookup noetig.
+const handleRevenueCatSubscriptionEvent = async (event, res) => {
+  const uid = event.app_user_id;
+  if (!uid || !adminDb) return res.json({ received: true });
+
+  const ref = adminDb.ref(`users/${uid}/profile/premiumSubscription`);
+  try {
+    switch (event.type) {
+      case 'INITIAL_PURCHASE':
+      case 'RENEWAL':
+      case 'PRODUCT_CHANGE':
+      case 'UNCANCELLATION':
+        await ref.set({
+          status: 'active',
+          provider: 'revenuecat',
+          priceId: event.product_id || null,
+          currentPeriodEnd: event.expiration_at_ms || null,
+          willRenew: true,
+          billingIssue: false,
+          store: event.store || null,
+        });
+        break;
+      case 'CANCELLATION':
+        await ref.update({ willRenew: false });
+        break;
+      case 'EXPIRATION':
+        await ref.update({ status: 'canceled', willRenew: false });
+        break;
+      case 'BILLING_ISSUE':
+        await ref.update({ billingIssue: true });
+        break;
+      default:
+        // andere Event-Typen (TRANSFER, SUBSCRIPTION_PAUSED, ...) bewusst ignoriert
+        break;
+    }
+    console.log(`✅ RevenueCat-Abo-Event ${event.type} verarbeitet (uid=${uid})`);
+    res.json({ received: true });
+  } catch (e) {
+    console.error('❌ RevenueCat-Abo-Webhook Fehler:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+};
+
+// POST /api/revenuecat-webhook — In-App-Kauf (iOS/Android) bestätigen: Coins (Einmalkauf) oder
+// Hitlines-Premium-Abo. Auth per Authorization-Header (im RevenueCat-Dashboard selbst
+// festgelegter Wert), kein HMAC noetig wie bei Stripe — RevenueCat sendet den Header-Wert 1:1 mit.
 app.post('/api/revenuecat-webhook', async (req, res) => {
   const authHeader = req.headers['authorization'];
   const webhookSecret = process.env.REVENUECAT_WEBHOOK_SECRET;
@@ -1093,8 +1147,14 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
   }
 
   const event = req.body?.event;
-  if (!event || event.type !== 'NON_RENEWING_PURCHASE') {
-    // Andere Event-Typen (Abo-Lifecycle etc.) betreffen uns nicht — quittieren und ignorieren.
+  if (!event) return res.json({ received: true });
+
+  if (PREMIUM_SUBSCRIPTION_PRODUCT_IDS.includes(event.product_id)) {
+    return handleRevenueCatSubscriptionEvent(event, res);
+  }
+
+  if (event.type !== 'NON_RENEWING_PURCHASE') {
+    // Andere Event-Typen (Abo-Lifecycle fuer unbekannte Produkte etc.) betreffen uns nicht.
     return res.json({ received: true });
   }
 
