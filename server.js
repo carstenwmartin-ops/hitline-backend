@@ -896,9 +896,10 @@ app.post('/api/admin/grant-complimentary', async (req, res) => {
     }
     const targetUser = await admin.auth().getUserByEmail(email);
     if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
-    await adminDb.ref(`users/${targetUser.uid}/profile`).update({ appleMusicComplimentary: true });
-    console.log(`🎁 Komplementär-Zugriff gewährt: ${email} (uid=${targetUser.uid})`);
-    res.json({ success: true, uid: targetUser.uid });
+    const grant = !req.body?.revoke;
+    await adminDb.ref(`users/${targetUser.uid}/profile`).update({ appleMusicComplimentary: grant });
+    console.log(`${grant ? '🎁 Komplementär-Zugriff gewährt' : '🚫 Komplementär-Zugriff entzogen'}: ${email} (uid=${targetUser.uid})`);
+    res.json({ success: true, uid: targetUser.uid, granted: grant });
   } catch (e) {
     console.error('❌ grant-complimentary Fehler:', e.message);
     if (e.code === 'auth/user-not-found') return res.status(404).json({ error: 'Kein Nutzer mit dieser E-Mail gefunden' });
