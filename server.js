@@ -941,6 +941,105 @@ app.get('/api/admin/complimentary-list', async (req, res) => {
   }
 });
 
+// POST /api/coins/sync-delta — Coins/totalEarned serverseitig gutschreiben (Anti-Cheat-
+// Zwischenlösung, 2026-08-27). Ersetzt den bisherigen direkten Client-Firebase-Write (den
+// database.rules.json inzwischen verbietet). Validiert NICHT jede Runde einzeln (das wäre
+// die "volle Lösung", siehe CLAUDE.md-Backlog) — nur eine Tages-Obergrenze fürs Gutschreiben.
+// 120/Tag deckt laut FEATURE_CONFIG.coinRules (max. ~8 Coins/Spiel) rund 15 Runden mit
+// Bestwertung ab — bewusst eng gefasst, da erspielte Coins hier vergleichsweise wertvoll
+// sind (anders als gekaufte). Ausgeben (negatives Delta) bleibt uneingeschränkt, da Ausgeben
+// nicht der Missbrauchsweg ist.
+const DAILY_COINS_CAP = 120;
+
+app.post('/api/coins/sync-delta', async (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+
+  const { coinsDelta = 0, totalEarnedDelta = 0 } = req.body || {};
+  if (typeof coinsDelta !== 'number' || typeof totalEarnedDelta !== 'number' || !Number.isFinite(coinsDelta) || !Number.isFinite(totalEarnedDelta)) {
+    return res.status(400).json({ error: 'coinsDelta/totalEarnedDelta müssen Zahlen sein' });
+  }
+
+  try {
+    const { default: admin } = await import('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const uid = decoded.uid;
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+
+    if (coinsDelta > 0) {
+      const today = new Date().toISOString().slice(0, 10);
+      const capRef = adminDb.ref(`users/${uid}/profile/dailyCoinsAwarded`);
+      const capResult = await capRef.transaction(current => {
+        const amountSoFar = (current?.date === today) ? (current.amount || 0) : 0;
+        const newAmount = amountSoFar + coinsDelta;
+        if (newAmount > DAILY_COINS_CAP) return; // undefined = Transaktion abbrechen
+        return { date: today, amount: newAmount };
+      });
+      if (!capResult.committed) {
+        console.warn(`⚠️ Tages-Limit für Noten erreicht: uid=${uid}, coinsDelta=${coinsDelta}`);
+        return res.status(429).json({ error: 'Tages-Limit für Noten erreicht' });
+      }
+    }
+
+    if (coinsDelta) {
+      await adminDb.ref(`users/${uid}/profile/coins`).transaction(current => (current || 0) + coinsDelta);
+    }
+    if (totalEarnedDelta) {
+      await adminDb.ref(`users/${uid}/profile/totalEarned`).transaction(current => (current || 0) + totalEarnedDelta);
+    }
+    res.json({ success: true });
+  } catch (e) {
+    console.error('❌ coins/sync-delta Fehler:', e.message);
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
+// GET /api/admin/coins-discrepancy-check — Erkennungs-Tool (Admin-only): vergleicht für jeden
+// Nutzer den aktuellen coins-Stand mit "5 Startguthaben + Summe aller coinHistory-Einträge".
+// Eine Abweichung bedeutet: der coins-Wert wurde irgendwann OHNE einen der bekannten,
+// history-loggenden Wege (addCoins/addCoinsBatch) verändert — z.B. durch direkte
+// localStorage- oder Firebase-Manipulation VOR Einführung des sync-delta-Endpoints, oder
+// einen (bislang nicht bekannten) verbleibenden Umgehungsweg. Reine Erkennung, kein Fix.
+app.get('/api/admin/coins-discrepancy-check', async (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+
+  try {
+    const { default: admin } = await import('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    if (decoded.email !== 'carstenwmartin@gmail.com') {
+      return res.status(403).json({ error: 'Nicht berechtigt' });
+    }
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+
+    const usersSnap = await adminDb.ref('users').once('value');
+    const allUsers = usersSnap.val() || {};
+
+    const STARTING_COINS = 5;
+    const results = [];
+    for (const uid of Object.keys(allUsers)) {
+      const node = allUsers[uid];
+      const actualCoins = node?.profile?.coins;
+      if (actualCoins === undefined) continue; // nie eingeloggt/kein Profil
+      const historyEntries = node?.coinHistory ? Object.values(node.coinHistory) : [];
+      const historySum = historyEntries.reduce((sum, e) => sum + (e?.amount || 0), 0);
+      const expectedCoins = STARTING_COINS + historySum;
+      const diff = actualCoins - expectedCoins;
+      if (diff !== 0) {
+        let email = '(unbekannt)';
+        try { email = (await admin.auth().getUser(uid)).email || '(keine E-Mail)'; } catch {}
+        results.push({ uid, email, actualCoins, expectedCoins, diff, historyEntryCount: historyEntries.length });
+      }
+    }
+    res.json({ success: true, checkedUsers: Object.keys(allUsers).length, discrepancies: results });
+  } catch (e) {
+    console.error('❌ coins-discrepancy-check Fehler:', e.message);
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
 // POST /api/account/delete — Konto vollständig löschen (Apple Guideline 5.1.1(v) / DSGVO Art. 17).
 // Jeder eingeloggte Nutzer darf nur sein EIGENES Konto löschen — uid kommt ausschließlich aus dem
 // verifizierten ID-Token, niemals aus dem Request-Body (sonst könnte ein Nutzer fremde Konten löschen).
