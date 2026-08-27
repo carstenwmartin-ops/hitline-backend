@@ -907,6 +907,40 @@ app.post('/api/admin/grant-complimentary', async (req, res) => {
   }
 });
 
+// GET /api/admin/complimentary-list — wer hat aktuell appleMusicComplimentary=true (Admin-only).
+// users/{uid} ist laut database.rules.json strikt Owner-only (kein Admin-Ausnahmefall in den
+// Rules) — im Firebase-Console-Datenbaum liesse sich das nur muehsam Knoten fuer Knoten pruefen,
+// daher dieser Endpoint statt eines manuellen Console-Durchsuchens.
+app.get('/api/admin/complimentary-list', async (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+
+  try {
+    const { default: admin } = await import('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    if (decoded.email !== 'carstenwmartin@gmail.com') {
+      return res.status(403).json({ error: 'Nicht berechtigt' });
+    }
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const snap = await adminDb.ref('users').once('value');
+    const allUsers = snap.val() || {};
+    const grantedUids = Object.keys(allUsers).filter(uid => allUsers[uid]?.profile?.appleMusicComplimentary === true);
+    const list = await Promise.all(grantedUids.map(async uid => {
+      try {
+        const u = await admin.auth().getUser(uid);
+        return { uid, email: u.email || '(keine E-Mail)' };
+      } catch {
+        return { uid, email: '(Konto nicht mehr auffindbar)' };
+      }
+    }));
+    res.json({ success: true, list });
+  } catch (e) {
+    console.error('❌ complimentary-list Fehler:', e.message);
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
 // POST /api/account/delete — Konto vollständig löschen (Apple Guideline 5.1.1(v) / DSGVO Art. 17).
 // Jeder eingeloggte Nutzer darf nur sein EIGENES Konto löschen — uid kommt ausschließlich aus dem
 // verifizierten ID-Token, niemals aus dem Request-Body (sonst könnte ein Nutzer fremde Konten löschen).
