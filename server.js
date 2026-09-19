@@ -1350,6 +1350,73 @@ const handleRevenueCatSubscriptionEvent = async (event, res) => {
   }
 };
 
+// POST /api/premium/refresh-store-subscription — Store-Abo (App Store/Google Play) des angemeldeten Kontos
+// direkt bei RevenueCat abfragen und in users/{uid}/profile/premiumSubscription übernehmen. Wird von
+// "Käufe wiederherstellen" aufgerufen (Apple verlangt eine funktionierende Wiederherstellung für Abos) und
+// deckt auch Fälle ab, in denen ein Webhook-Ereignis (z.B. TRANSFER nach Restore) nichts geschrieben hat.
+// Auth: Firebase-ID-Token; uid kommt ausschließlich daraus. Ein aktives Stripe-Abo wird nie überschrieben.
+app.post('/api/premium/refresh-store-subscription', async (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+
+  let uid;
+  try {
+    const { default: admin } = await import('firebase-admin');
+    uid = (await admin.auth().verifyIdToken(idToken)).uid;
+  } catch (e) {
+    return res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+
+  const key = process.env.REVENUECAT_SECRET_API_KEY;
+  if (!key || !adminDb) return res.status(503).json({ error: 'Nicht konfiguriert' });
+
+  try {
+    const rc = await fetch(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(uid)}`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!rc.ok) throw new Error(`RevenueCat HTTP ${rc.status}`);
+    const subs = (await rc.json())?.subscriber?.subscriptions || {};
+
+    // Aktives Premium-Abo mit dem spätesten Ablauf suchen
+    let best = null;
+    for (const pid of PREMIUM_SUBSCRIPTION_PRODUCT_IDS) {
+      const sub = subs[pid];
+      const exp = sub ? Date.parse(sub.expires_date) : NaN;
+      if (!Number.isNaN(exp) && exp > Date.now() && (!best || exp > best.exp)) best = { pid, sub, exp };
+    }
+
+    const ref = adminDb.ref(`users/${uid}/profile/premiumSubscription`);
+    const existing = (await ref.once('value')).val();
+
+    if (best) {
+      if (existing?.provider === 'stripe' && existing.status === 'active') {
+        return res.json({ active: true, provider: 'stripe' });
+      }
+      await ref.set({
+        status: 'active',
+        provider: 'revenuecat',
+        priceId: best.pid,
+        currentPeriodEnd: best.exp,
+        willRenew: !best.sub.unsubscribe_detected_at,
+        billingIssue: !!best.sub.billing_issues_detected_at,
+        store: best.sub.store || null,
+      });
+      console.log(`🔄 Store-Abo aus RevenueCat übernommen (uid=${uid}, ${best.pid})`);
+      return res.json({ active: true, provider: 'revenuecat' });
+    }
+
+    // Kein aktives Store-Abo mehr: einen veralteten "aktiv"-Eintrag aus dem Store beenden
+    if (existing?.provider === 'revenuecat' && existing.status === 'active') {
+      await ref.update({ status: 'canceled', willRenew: false });
+    }
+    return res.json({ active: false });
+  } catch (e) {
+    console.error('❌ refresh-store-subscription:', e.message);
+    return res.status(502).json({ error: 'Store-Abgleich fehlgeschlagen' });
+  }
+});
+
 // POST /api/revenuecat-webhook — In-App-Kauf (iOS/Android) bestätigen: Coins (Einmalkauf) oder
 // Hitlines-Premium-Abo. Auth per Authorization-Header (im RevenueCat-Dashboard selbst
 // festgelegter Wert), kein HMAC noetig wie bei Stripe — RevenueCat sendet den Header-Wert 1:1 mit.
