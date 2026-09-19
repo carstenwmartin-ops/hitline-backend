@@ -1040,6 +1040,14 @@ app.get('/api/admin/coins-discrepancy-check', async (req, res) => {
   }
 });
 
+// Baut aus dem gespeicherten Schlüsseltext ein gültiges PEM (PKCS#8): egal ob die BEGIN/END-Zeilen
+// fehlen, die Zeilenumbrüche als literales \n gespeichert oder beim Einfügen zu Leerzeichen wurden.
+const normalizePrivateKey = (raw) => {
+  const body = (raw || '').replace(/\\n/g, '\n').replace(/-----(BEGIN|END)[^-]*-----/g, '').replace(/\s+/g, '');
+  if (!body) return '';
+  return `-----BEGIN PRIVATE KEY-----\n${body.match(/.{1,64}/g).join('\n')}\n-----END PRIVATE KEY-----\n`;
+};
+
 // Sign in with Apple: Apple verlangt beim Löschen eines Kontos, das per "Sign in with Apple" angelegt
 // wurde, den Widerruf des Tokens (App Store Review Guideline 5.1.1(v)). Ablauf: Authorization-Code
 // (frisch beim Löschen per nativem Apple-Login geholt) gegen Refresh-Token tauschen, dann widerrufen.
@@ -1049,7 +1057,7 @@ app.get('/api/admin/coins-discrepancy-check', async (req, res) => {
 const revokeAppleSignIn = async (authorizationCode, uid) => {
   const teamId = process.env.APPLE_TEAM_ID;
   const keyId = process.env.APPLE_SIGNIN_KEY_ID;
-  const privateKey = (process.env.APPLE_SIGNIN_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+  const privateKey = normalizePrivateKey(process.env.APPLE_SIGNIN_PRIVATE_KEY);
   const clientId = process.env.APPLE_SIGNIN_CLIENT_ID || 'com.hitlines.songflow';
   if (!teamId || !keyId || !privateKey) {
     console.warn(`⚠️ Apple-Token-Widerruf übersprungen (uid=${uid}): APPLE_TEAM_ID/APPLE_SIGNIN_KEY_ID/APPLE_SIGNIN_PRIVATE_KEY fehlen`);
@@ -1502,7 +1510,7 @@ const logAccountDeletionReadiness = () => {
     console.warn('⚠️ Apple-Token-Widerruf NICHT bereit — fehlt: ' + missing.join(', '));
   } else {
     try {
-      jwt.sign({}, rawKey.replace(/\\n/g, '\n'), { algorithm: 'ES256', expiresIn: '1m', keyid: keyId });
+      jwt.sign({}, normalizePrivateKey(rawKey), { algorithm: 'ES256', expiresIn: '1m', keyid: keyId });
       console.log('🍎 Apple-Token-Widerruf bereit (Schlüssel gültig)');
     } catch (e) {
       console.warn('⚠️ Apple-Token-Widerruf NICHT bereit — APPLE_SIGNIN_PRIVATE_KEY nicht als ES256-Schlüssel lesbar: ' + e.message);
