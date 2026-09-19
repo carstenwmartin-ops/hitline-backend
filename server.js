@@ -1487,8 +1487,35 @@ app.post('/api/redeem-promo', async (req, res) => {
   }
 });
 
+// Start-Check der Variablen für die Konto-Löschung: gibt NUR aus, ob alles bereit ist, nie Werte.
+// Der Sign-in-with-Apple-Schlüssel wird testweise zum Signieren benutzt — so fällt ein falsch
+// eingefügter .p8-Inhalt (z.B. verlorene Zeilenumbrüche) beim Start auf statt erst beim ersten Löschen.
+const logAccountDeletionReadiness = () => {
+  const teamId = process.env.APPLE_TEAM_ID;
+  const keyId = process.env.APPLE_SIGNIN_KEY_ID;
+  const rawKey = process.env.APPLE_SIGNIN_PRIVATE_KEY || '';
+  const missing = [];
+  if (!teamId) missing.push('APPLE_TEAM_ID');
+  if (!keyId) missing.push('APPLE_SIGNIN_KEY_ID');
+  if (!rawKey) missing.push('APPLE_SIGNIN_PRIVATE_KEY');
+  if (missing.length) {
+    console.warn('⚠️ Apple-Token-Widerruf NICHT bereit — fehlt: ' + missing.join(', '));
+  } else {
+    try {
+      jwt.sign({}, rawKey.replace(/\\n/g, '\n'), { algorithm: 'ES256', expiresIn: '1m', keyid: keyId });
+      console.log('🍎 Apple-Token-Widerruf bereit (Schlüssel gültig)');
+    } catch (e) {
+      console.warn('⚠️ Apple-Token-Widerruf NICHT bereit — APPLE_SIGNIN_PRIVATE_KEY nicht als ES256-Schlüssel lesbar: ' + e.message);
+    }
+  }
+  console.log(process.env.REVENUECAT_SECRET_API_KEY
+    ? '🗑️ RevenueCat-Löschung bereit'
+    : '⚠️ RevenueCat-Löschung NICHT bereit — fehlt: REVENUECAT_SECRET_API_KEY');
+};
+
 app.listen(PORT, () => {
   console.log(`🚀 Backend läuft auf Port ${PORT}`);
+  logAccountDeletionReadiness();
   console.log('📡 Endpoints:');
   console.log('   POST /api/hitline-playlist');
   console.log('   POST /api/hitline-playlist-large');
