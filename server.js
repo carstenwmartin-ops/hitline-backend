@@ -72,7 +72,8 @@ const callClaude = async (system, userContent, maxTokens = 2000, temperature) =>
 // =====================================================================
 app.post('/api/hitline-playlist', async (req, res) => {
   const { prompt, songCount } = req.body;
-  console.log('🎵 Kleine Playlist für:', prompt);
+  // Freitext des Nutzers bewusst NICHT loggen (kann Personenbezug enthalten) — nur die Länge.
+  console.log(`🎵 Kleine Playlist-Anfrage (${String(prompt || '').length} Zeichen)`);
 
   try {
     const cleanPrompt = sanitizePrompt(prompt);
@@ -110,7 +111,7 @@ app.post('/api/hitline-playlist', async (req, res) => {
 app.post('/api/hitline-playlist-large', async (req, res) => {
   const { prompt, totalCount } = req.body;
   const target = Math.min(Math.max(parseInt(totalCount) || 75, 10), 150); // ← 150 max
-  console.log(`🎵 Große Künstler-Playlist: "${prompt}" → ${target} Künstler`);
+  console.log(`🎵 Große Künstler-Playlist (${String(prompt || '').length} Zeichen) → ${target} Künstler`);
 
   try {
     const cleanPrompt = sanitizePrompt(prompt);
@@ -168,7 +169,7 @@ app.post('/api/hitline-playlist-large', async (req, res) => {
 app.post('/api/hitline-playlist-tracks', async (req, res) => {
   const { prompt, totalCount } = req.body;
   const target = Math.min(Math.max(parseInt(totalCount) || 75, 10), 200);
-  console.log(`🎵 Song-Playlist: "${prompt}" → ${target} Songs`);
+  console.log(`🎵 Song-Playlist (${String(prompt || '').length} Zeichen) → ${target} Songs`);
 
   try {
     const cleanPrompt = sanitizePrompt(prompt);
