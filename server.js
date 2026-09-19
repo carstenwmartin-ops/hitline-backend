@@ -1040,6 +1040,66 @@ app.get('/api/admin/coins-discrepancy-check', async (req, res) => {
   }
 });
 
+// Sign in with Apple: Apple verlangt beim Löschen eines Kontos, das per "Sign in with Apple" angelegt
+// wurde, den Widerruf des Tokens (App Store Review Guideline 5.1.1(v)). Ablauf: Authorization-Code
+// (frisch beim Löschen per nativem Apple-Login geholt) gegen Refresh-Token tauschen, dann widerrufen.
+// Wirft nie — die Konto-Löschung selbst darf daran nicht scheitern; Fehler werden nur geloggt.
+// Benötigt (Render): APPLE_TEAM_ID (existiert bereits), APPLE_SIGNIN_KEY_ID, APPLE_SIGNIN_PRIVATE_KEY
+// (.p8-Inhalt des "Sign in with Apple"-Schlüssels); optional APPLE_SIGNIN_CLIENT_ID (Standard: Bundle-ID).
+const revokeAppleSignIn = async (authorizationCode, uid) => {
+  const teamId = process.env.APPLE_TEAM_ID;
+  const keyId = process.env.APPLE_SIGNIN_KEY_ID;
+  const privateKey = (process.env.APPLE_SIGNIN_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+  const clientId = process.env.APPLE_SIGNIN_CLIENT_ID || 'com.hitlines.songflow';
+  if (!teamId || !keyId || !privateKey) {
+    console.warn(`⚠️ Apple-Token-Widerruf übersprungen (uid=${uid}): APPLE_TEAM_ID/APPLE_SIGNIN_KEY_ID/APPLE_SIGNIN_PRIVATE_KEY fehlen`);
+    return;
+  }
+  try {
+    const clientSecret = jwt.sign({}, privateKey, {
+      algorithm: 'ES256', expiresIn: '10m', audience: 'https://appleid.apple.com',
+      issuer: teamId, subject: clientId, keyid: keyId,
+    });
+    const post = (url, params) => fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(params).toString(),
+    });
+    const tokenRes = await post('https://appleid.apple.com/auth/token', {
+      client_id: clientId, client_secret: clientSecret, code: authorizationCode, grant_type: 'authorization_code',
+    });
+    const tokenData = await tokenRes.json().catch(() => ({}));
+    if (!tokenRes.ok || !tokenData.refresh_token) throw new Error(`Token-Tausch fehlgeschlagen (${tokenRes.status} ${tokenData.error || ''})`);
+    const revokeRes = await post('https://appleid.apple.com/auth/revoke', {
+      client_id: clientId, client_secret: clientSecret, token: tokenData.refresh_token, token_type_hint: 'refresh_token',
+    });
+    if (!revokeRes.ok) throw new Error(`Widerruf fehlgeschlagen (${revokeRes.status})`);
+    console.log(`🍎 Sign-in-with-Apple-Token widerrufen (uid=${uid})`);
+  } catch (e) {
+    console.warn(`⚠️ Apple-Token-Widerruf fehlgeschlagen (uid=${uid}):`, e.message);
+  }
+};
+
+// RevenueCat: Kundendatensatz (app_user_id = Firebase-uid) mitlöschen, damit dort keine personenbezogenen
+// Kaufdaten zurückbleiben. Benötigt REVENUECAT_SECRET_API_KEY (Secret Key, nicht der öffentliche SDK-Key).
+// Wirft nie; ein bereits fehlender Datensatz (404) ist in Ordnung.
+const deleteRevenueCatSubscriber = async (uid) => {
+  const key = process.env.REVENUECAT_SECRET_API_KEY;
+  if (!key) {
+    console.warn(`⚠️ RevenueCat-Löschung übersprungen (uid=${uid}): REVENUECAT_SECRET_API_KEY fehlt`);
+    return;
+  }
+  try {
+    const r = await fetch(`https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(uid)}`, {
+      method: 'DELETE', headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!r.ok && r.status !== 404) throw new Error(`HTTP ${r.status}`);
+    console.log(`🗑️ RevenueCat-Kundendatensatz gelöscht (uid=${uid})`);
+  } catch (e) {
+    console.warn(`⚠️ RevenueCat-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
+  }
+};
+
 // POST /api/account/delete — Konto vollständig löschen (Apple Guideline 5.1.1(v) / DSGVO Art. 17).
 // Jeder eingeloggte Nutzer darf nur sein EIGENES Konto löschen — uid kommt ausschließlich aus dem
 // verifizierten ID-Token, niemals aus dem Request-Body (sonst könnte ein Nutzer fremde Konten löschen).
@@ -1077,6 +1137,19 @@ app.post('/api/account/delete', async (req, res) => {
         await adminDb.ref(`stripeCustomerLinks/${customerId}`).remove();
       }
       await adminDb.ref(`users/${uid}`).remove();
+    }
+
+    // Sign in with Apple: Token widerrufen (Code kommt vom Client, siehe App.jsx "Konto löschen").
+    const appleCode = typeof req.body?.appleAuthorizationCode === 'string' ? req.body.appleAuthorizationCode : null;
+    if (appleCode) await revokeAppleSignIn(appleCode, uid);
+    await deleteRevenueCatSubscriber(uid);
+
+    // Profilbild im Firebase Storage (avatars/{uid}) enthält personenbezogene Daten und liegt
+    // ausserhalb der Realtime Database — muss separat gelöscht werden.
+    try {
+      await admin.storage().bucket('hitline-139be.firebasestorage.app').file(`avatars/${uid}`).delete({ ignoreNotFound: true });
+    } catch (e) {
+      console.warn(`⚠️ Avatar-Löschung bei Konto-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
     }
 
     await admin.auth().deleteUser(uid);
