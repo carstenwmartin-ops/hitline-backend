@@ -1283,6 +1283,10 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
   const event = req.body?.event;
   if (!event) return res.json({ received: true });
 
+  // Eingangs-Log fuer jedes authentifizierte Event (auch ignorierte) — macht Sandbox-Tests
+  // und die Fehlersuche im Render-Log ohne Blick ins RevenueCat-Dashboard moeglich.
+  console.log(`📩 RevenueCat-Webhook: type=${event.type} product=${event.product_id || '-'} env=${event.environment || '-'} store=${event.store || '-'} uid=${event.app_user_id || '-'}`);
+
   if (PREMIUM_SUBSCRIPTION_PRODUCT_IDS.includes(event.product_id)) {
     return handleRevenueCatSubscriptionEvent(event, res);
   }
