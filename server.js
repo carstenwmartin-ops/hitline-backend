@@ -18,7 +18,8 @@ if (!apiKey) {
   process.exit(1);
 }
 
-console.log('✅ OpenRouter API Key geladen:', apiKey.substring(0, 20) + '...');
+// Nur die Tatsache loggen, nie Teile des Schlüssels (Render-Logs sind für mehrere Personen einsehbar).
+console.log('✅ OpenRouter API Key geladen');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
