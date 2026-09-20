@@ -5,6 +5,9 @@ import http2 from 'http2';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { createMailService } from './mail/service.js';
+import { isMailConfigured, missingMailConfig, sendMail } from './mailer.js';
+import { validateConsent } from './consent.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -735,6 +738,9 @@ app.get('/api/coin-packages', async (req, res) => {
 app.post('/api/create-checkout', async (req, res) => {
   const { packageId, uid, successUrl, cancelUrl } = req.body;
   if (!packageId || !uid) return res.status(400).json({ error: 'packageId und uid erforderlich' });
+  // Ohne ausdrückliche Zustimmung zum sofortigen Beginn (Häkchen im Kaufdialog) kein Kauf
+  const consent = validateConsent(req.body);
+  if (!consent) return res.status(400).json({ error: 'consent_required' });
 
   const packages = await getCoinPackages();
   const pkg = packages.find(p => p.id === packageId);
@@ -760,7 +766,7 @@ app.post('/api/create-checkout', async (req, res) => {
       mode: 'payment',
       success_url: successUrl || 'https://hitlines-song2flow-fri3nds.netlify.app?payment=success',
       cancel_url: cancelUrl || 'https://hitlines-song2flow-fri3nds.netlify.app?payment=cancelled',
-      metadata: { uid, packageId, coins: String(pkg.coins) },
+      metadata: { uid, packageId, coins: String(pkg.coins), consent_at: String(consent.givenAt), consent_version: consent.version },
     });
 
     console.log(`💳 Checkout erstellt: ${pkg.name} für uid=${uid}`);
@@ -788,6 +794,21 @@ const resolveUidByStripeCustomer = async (customerId) => {
   return snap.val();
 };
 
+// Kaufbestätigung per E-Mail (Warteschlange in Firebase, siehe mail/service.js)
+const mailService = createMailService(() => adminDb);
+
+// Kaufeintrag users/{uid}/purchases/{id} anlegen. Der Eintrag dient dreifach: (1) Kaufverlauf im Konto,
+// (2) Nachweis der Zustimmung zum sofortigen Beginn, (3) Grundlage der Bestätigungsmail. Gleichzeitig ist er
+// die Sperre gegen doppelte Zustellung desselben Stripe-Ereignisses: existiert er schon, wird NICHT erneut
+// gutgeschrieben (Stripe stellt Webhooks bei Zeitüberschreitung mehrfach zu).
+// Rückgabe: true = neu angelegt, false = war schon vorhanden.
+const claimPurchase = async (uid, record) => {
+  const ref = adminDb.ref(`users/${uid}/purchases/${record.id}`);
+  const result = await ref.transaction((cur) => (cur ? undefined : record));
+  return result.committed;
+};
+const releasePurchase = async (uid, id) => { try { await adminDb.ref(`users/${uid}/purchases/${id}`).remove(); } catch (e) { /* ignorieren */ } };
+
 const PREMIUM_PRICE_IDS = {
   monthly: () => process.env.STRIPE_PRICE_MONTHLY,
   yearly: () => process.env.STRIPE_PRICE_YEARLY,
@@ -797,6 +818,8 @@ const PREMIUM_PRICE_IDS = {
 app.post('/api/create-subscription-checkout', async (req, res) => {
   const { plan, uid, email, successUrl, cancelUrl } = req.body || {};
   if (!plan || !uid) return res.status(400).json({ error: 'plan und uid erforderlich' });
+  const consent = validateConsent(req.body || {});
+  if (!consent) return res.status(400).json({ error: 'consent_required' });
 
   const priceId = PREMIUM_PRICE_IDS[plan]?.();
   if (!priceId) return res.status(400).json({ error: 'Unbekannter oder nicht konfigurierter Plan' });
@@ -836,7 +859,7 @@ app.post('/api/create-subscription-checkout', async (req, res) => {
       mode: 'subscription',
       success_url: successUrl || 'https://hitlines-song2flow-fri3nds.netlify.app?subscription=success',
       cancel_url: cancelUrl || 'https://hitlines-song2flow-fri3nds.netlify.app?subscription=cancelled',
-      metadata: { uid },
+      metadata: { uid, plan, consent_at: String(consent.givenAt), consent_version: consent.version },
       subscription_data: { metadata: { uid } },
     });
 
@@ -1194,12 +1217,32 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     // nach — hier reicht es, den Customer-Link sicherzustellen (falls create-subscription-
     // checkout ihn aus irgendeinem Grund noch nicht gesetzt hat). Kein Coins-Metadata-Pfad.
     if (session.mode === 'subscription') {
-      const { uid } = session.metadata || {};
+      const { uid, plan, consent_at, consent_version } = session.metadata || {};
       if (uid && session.customer) await linkStripeCustomer(session.customer, uid);
+      if (uid && adminDb) {
+        try {
+          const consentText = (await import('./consent.js')).CONSENT_TEXTS[consent_version] || null;
+          const { LEGAL } = await import('./legal/index.js');
+          const created = await claimPurchase(uid, {
+            id: session.id, kind: 'premium', plan: plan || null,
+            productName: `Hitlines Premium (${plan === 'yearly' ? 'jährlich' : 'monatlich'})`,
+            amount: session.amount_total ?? null, currency: session.currency || 'eur',
+            createdAt: (session.created || Math.floor(Date.now() / 1000)) * 1000,
+            customerEmail: session.customer_details?.email || session.customer_email || null,
+            provider: 'stripe',
+            consent: consent_at ? { givenAt: Number(consent_at), version: consent_version || null, text: consentText } : null,
+            legal: { agbStand: LEGAL.agb.stand, widerrufStand: LEGAL.widerruf.stand },
+            emailStatus: 'pending',
+          });
+          if (created) await mailService.enqueue(uid, session.id);
+        } catch (e) {
+          console.error('❌ Kaufeintrag/Mail (Abo) fehlgeschlagen:', e.message);
+        }
+      }
       return res.json({ received: true });
     }
 
-    const { uid, coins } = session.metadata || {};
+    const { uid, coins, packageId, consent_at, consent_version } = session.metadata || {};
 
     if (!uid || !coins) {
       console.error('❌ Fehlende Metadata in Session:', session.id);
@@ -1211,8 +1254,31 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
       return res.status(500).json({ error: 'Firebase nicht verfügbar' });
     }
 
+    let purchaseClaimed = false;
     try {
       const coinsToAdd = parseInt(coins, 10);
+
+      // Kaufeintrag zuerst anlegen = Sperre gegen doppelte Gutschrift bei mehrfach zugestelltem Webhook
+      const packages = await getCoinPackages();
+      const pkg = packages.find((p) => p.id === packageId);
+      const consentText = (await import('./consent.js')).CONSENT_TEXTS[consent_version] || null;
+      const { LEGAL } = await import('./legal/index.js');
+      purchaseClaimed = await claimPurchase(uid, {
+        id: session.id, kind: 'coins', packageId: packageId || null, coins: coinsToAdd,
+        productName: pkg?.name ? `Hitlines: ${pkg.name}` : `Hitlines: ${coinsToAdd} Noten`,
+        amount: session.amount_total ?? null, currency: session.currency || 'eur',
+        createdAt: (session.created || Math.floor(Date.now() / 1000)) * 1000,
+        customerEmail: session.customer_details?.email || session.customer_email || null,
+        provider: 'stripe',
+        consent: consent_at ? { givenAt: Number(consent_at), version: consent_version || null, text: consentText } : null,
+        legal: { agbStand: LEGAL.agb.stand, widerrufStand: LEGAL.widerruf.stand },
+        emailStatus: 'pending',
+      });
+      if (!purchaseClaimed) {
+        console.log(`↩️ Stripe-Webhook: Kauf ${session.id} bereits verarbeitet, übersprungen`);
+        return res.json({ received: true, duplicate: true });
+      }
+
       const profileRef = adminDb.ref(`users/${uid}/profile`);
       await profileRef.transaction(profile => {
         if (!profile) return { coins: coinsToAdd, totalEarned: coinsToAdd };
@@ -1223,9 +1289,12 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
         };
       });
       console.log(`✅ ${coinsToAdd} Coins für uid=${uid} gutgeschrieben`);
+      await mailService.enqueue(uid, session.id);
       res.json({ received: true });
     } catch (e) {
       console.error('❌ Firebase Schreib-Fehler:', e.message);
+      // Gutschrift nicht erfolgt: Sperre lösen, damit die erneute Zustellung durch Stripe greifen kann
+      if (purchaseClaimed) await releasePurchase(uid, session.id);
       res.status(500).json({ error: e.message });
     }
   } else if (event.type === 'customer.subscription.created' || event.type === 'customer.subscription.updated') {
@@ -1593,6 +1662,30 @@ const logAccountDeletionReadiness = () => {
 app.listen(PORT, () => {
   console.log(`🚀 Backend läuft auf Port ${PORT}`);
   logAccountDeletionReadiness();
+  console.log(isMailConfigured()
+    ? '✉️ Mailversand bereit (Kaufbestätigungen)'
+    : '⚠️ Mailversand NICHT bereit — fehlt: ' + missingMailConfig().join(', ') + ' (Kaufbestätigungen bleiben in der Warteschlange)');
+  mailService.start();
+
+  // Selbsttest des Mailversands ohne Testkauf: Ist MAIL_TEST_TO gesetzt, wird beim Start EINE Beispiel-Bestätigung
+  // an diese Adresse gesendet und das Ergebnis geloggt (Fehler mit Code, nie mit Zugangsdaten). Nach dem Test die
+  // Variable wieder entfernen, sonst geht bei jedem Neustart eine Testmail raus.
+  if (process.env.MAIL_TEST_TO && isMailConfigured()) {
+    (async () => {
+      try {
+        const { buildPurchaseConfirmation } = await import('./mail/purchaseConfirmation.js');
+        const { CONSENT_TEXTS } = await import('./consent.js');
+        const m = buildPurchaseConfirmation({
+          id: 'TESTMAIL', kind: 'coins', coins: 40, productName: 'Hitlines: 40 Noten (Testmail)', amount: 299, currency: 'eur',
+          createdAt: Date.now(), consent: { givenAt: Date.now(), version: 'v1', text: CONSENT_TEXTS.v1 },
+        });
+        const r = await sendMail({ to: process.env.MAIL_TEST_TO, ...m, subject: '[TEST] ' + m.subject });
+        console.log(`✉️ Testmail an ${process.env.MAIL_TEST_TO} versendet (${r.messageId})`);
+      } catch (e) {
+        console.error(`❌ Testmail fehlgeschlagen: code=${e.code || '-'} smtp=${e.responseCode || '-'} ${String(e.message).slice(0, 200)}`);
+      }
+    })();
+  }
   console.log('📡 Endpoints:');
   console.log('   POST /api/hitline-playlist');
   console.log('   POST /api/hitline-playlist-large');
