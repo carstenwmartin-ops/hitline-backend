@@ -1251,12 +1251,70 @@ const deleteRevenueCatSubscriber = async (uid) => {
   }
 };
 
-// POST /api/account/delete — Konto vollständig löschen (Apple Guideline 5.1.1(v) / DSGVO Art. 17).
-// Jeder eingeloggte Nutzer darf nur sein EIGENES Konto löschen — uid kommt ausschließlich aus dem
-// verifizierten ID-Token, niemals aus dem Request-Body (sonst könnte ein Nutzer fremde Konten löschen).
+// Löscht ein Konto vollständig (Stripe-Abo kündigen, Realtime-Database-Daten, Feedback-Einträge,
+// Sign-in-with-Apple-Token, RevenueCat-Datensatz, Profilbild, Auth-User). Gemeinsame Logik für
+// POST /api/account/delete (Selbst-Löschung) und POST /api/admin/delete-testers (Sammel-Löschung).
 // Reihenfolge bewusst: erst Stripe-Abo kündigen (sonst zahlt der Nutzer nach Löschung weiter, ohne
 // Zugriff auf die App zu haben, um es selbst zu kündigen), dann Firebase-Daten, zuletzt der Auth-User
 // selbst (erst nach erfolgreichem Datenaufräumen — verifyIdToken würde sonst bei einem Retry ins Leere laufen).
+// appleCode: nur bei Selbst-Löschung verfügbar (frischer Authorization-Code aus erneutem Apple-Login);
+// der Admin kann das Apple-Token fremder Konten nicht widerrufen.
+const deleteAccountData = async (uid, { appleCode = null } = {}) => {
+  const { default: admin } = await import('firebase-admin');
+
+  if (adminDb) {
+    const customerId = (await adminDb.ref(`users/${uid}/profile/premiumSubscription/stripeCustomerId`).once('value')).val();
+    const subscriptionId = (await adminDb.ref(`users/${uid}/profile/premiumSubscription/stripeSubscriptionId`).once('value')).val();
+    const stripeKey = process.env.STRIPE_SECRET_KEY;
+
+    if (subscriptionId && stripeKey) {
+      try {
+        const { default: Stripe } = await import('stripe');
+        const stripe = new Stripe(stripeKey);
+        await stripe.subscriptions.cancel(subscriptionId);
+        console.log(`🗑️ Abo ${subscriptionId} wegen Konto-Löschung gekündigt (uid=${uid})`);
+      } catch (e) {
+        // Abo evtl. schon gekündigt/ausgelaufen — Löschung trotzdem fortsetzen
+        console.warn(`⚠️ Abo-Kündigung bei Konto-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
+      }
+    }
+
+    if (customerId) {
+      await adminDb.ref(`stripeCustomerLinks/${customerId}`).remove();
+    }
+    await adminDb.ref(`users/${uid}`).remove();
+
+    // Beta-Feedback liegt unter feedback/{id} (nicht unter users/{uid}) und enthält E-Mail und Text —
+    // gehört zum Konto und muss mit gelöscht werden (siehe database.rules.json: .indexOn uid).
+    try {
+      const fb = await adminDb.ref('feedback').orderByChild('uid').equalTo(uid).once('value');
+      const updates = {};
+      fb.forEach((child) => { updates[child.key] = null; });
+      if (Object.keys(updates).length > 0) await adminDb.ref('feedback').update(updates);
+    } catch (e) {
+      console.warn(`⚠️ Feedback-Löschung bei Konto-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
+    }
+  }
+
+  // Sign in with Apple: Token widerrufen (Code kommt vom Client, siehe App.jsx "Konto löschen").
+  if (appleCode) await revokeAppleSignIn(appleCode, uid);
+  await deleteRevenueCatSubscriber(uid);
+
+  // Profilbild im Firebase Storage (avatars/{uid}) enthält personenbezogene Daten und liegt
+  // ausserhalb der Realtime Database — muss separat gelöscht werden.
+  try {
+    await admin.storage().bucket('hitline-139be.firebasestorage.app').file(`avatars/${uid}`).delete({ ignoreNotFound: true });
+  } catch (e) {
+    console.warn(`⚠️ Avatar-Löschung bei Konto-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
+  }
+
+  await admin.auth().deleteUser(uid);
+  console.log(`🗑️ Konto gelöscht: uid=${uid}`);
+};
+
+// POST /api/account/delete — Konto vollständig löschen (Apple Guideline 5.1.1(v) / DSGVO Art. 17).
+// Jeder eingeloggte Nutzer darf nur sein EIGENES Konto löschen — uid kommt ausschließlich aus dem
+// verifizierten ID-Token, niemals aus dem Request-Body (sonst könnte ein Nutzer fremde Konten löschen).
 app.post('/api/account/delete', async (req, res) => {
   const authHeader = req.headers['authorization'] || '';
   const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
@@ -1265,50 +1323,61 @@ app.post('/api/account/delete', async (req, res) => {
   try {
     const { default: admin } = await import('firebase-admin');
     const decoded = await admin.auth().verifyIdToken(idToken);
-    const uid = decoded.uid;
-
-    if (adminDb) {
-      const customerId = (await adminDb.ref(`users/${uid}/profile/premiumSubscription/stripeCustomerId`).once('value')).val();
-      const subscriptionId = (await adminDb.ref(`users/${uid}/profile/premiumSubscription/stripeSubscriptionId`).once('value')).val();
-      const stripeKey = process.env.STRIPE_SECRET_KEY;
-
-      if (subscriptionId && stripeKey) {
-        try {
-          const { default: Stripe } = await import('stripe');
-          const stripe = new Stripe(stripeKey);
-          await stripe.subscriptions.cancel(subscriptionId);
-          console.log(`🗑️ Abo ${subscriptionId} wegen Konto-Löschung gekündigt (uid=${uid})`);
-        } catch (e) {
-          // Abo evtl. schon gekündigt/ausgelaufen — Löschung trotzdem fortsetzen
-          console.warn(`⚠️ Abo-Kündigung bei Konto-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
-        }
-      }
-
-      if (customerId) {
-        await adminDb.ref(`stripeCustomerLinks/${customerId}`).remove();
-      }
-      await adminDb.ref(`users/${uid}`).remove();
-    }
-
-    // Sign in with Apple: Token widerrufen (Code kommt vom Client, siehe App.jsx "Konto löschen").
     const appleCode = typeof req.body?.appleAuthorizationCode === 'string' ? req.body.appleAuthorizationCode : null;
-    if (appleCode) await revokeAppleSignIn(appleCode, uid);
-    await deleteRevenueCatSubscriber(uid);
-
-    // Profilbild im Firebase Storage (avatars/{uid}) enthält personenbezogene Daten und liegt
-    // ausserhalb der Realtime Database — muss separat gelöscht werden.
-    try {
-      await admin.storage().bucket('hitline-139be.firebasestorage.app').file(`avatars/${uid}`).delete({ ignoreNotFound: true });
-    } catch (e) {
-      console.warn(`⚠️ Avatar-Löschung bei Konto-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
-    }
-
-    await admin.auth().deleteUser(uid);
-    console.log(`🗑️ Konto gelöscht: uid=${uid}`);
+    await deleteAccountData(decoded.uid, { appleCode });
     res.json({ success: true });
   } catch (e) {
     console.error('❌ Konto-Löschung Fehler:', e.message);
     res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
+// POST /api/admin/delete-testers { confirm?: boolean, expectedCount?: number } — Admin-only.
+// Löscht ALLE als TestFlight-Tester markierten Konten (profile.testChannel gesetzt) samt Feedback.
+// Zweistufig, weil unumkehrbar: ohne confirm nur Vorschau (Liste); mit confirm:true UND
+// expectedCount (muss genau der Zahl der aktuell gefundenen Konten entsprechen, sonst 409 —
+// schützt vor einer zwischenzeitlich geänderten Liste) wird gelöscht. Konten mit der Admin-E-Mail
+// werden nie gelöscht, auch wenn sie markiert sind (z. B. durch "alle bestehenden markieren").
+app.post('/api/admin/delete-testers', async (req, res) => {
+  try {
+    const decoded = await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const { confirm, expectedCount } = req.body || {};
+
+    const usersSnap = await adminDb.ref('users').once('value');
+    const allUsers = usersSnap.val() || {};
+    const testers = [];
+    for (const uid of Object.keys(allUsers)) {
+      const profile = allUsers[uid]?.profile;
+      if (!profile?.testChannel) continue;
+      let email = null;
+      try { email = (await admin.auth().getUser(uid)).email || null; } catch {}
+      if (uid === decoded.uid || email === 'carstenwmartin@gmail.com') continue; // Admin nie löschen
+      testers.push({ uid, email, testChannel: profile.testChannel, testChannelSetAt: profile.testChannelSetAt || null });
+    }
+
+    if (confirm !== true) {
+      return res.json({ success: true, dryRun: true, count: testers.length, testers });
+    }
+    if (expectedCount !== testers.length) {
+      return res.status(409).json({ error: `Die Liste hat sich geändert (jetzt ${testers.length} Konten) — bitte Vorschau neu laden.` });
+    }
+
+    const deleted = [];
+    const failed = [];
+    for (const t of testers) {
+      try {
+        await deleteAccountData(t.uid);
+        deleted.push(t.uid);
+      } catch (e) {
+        console.error(`❌ Test-Konto ${t.uid} konnte nicht gelöscht werden:`, e.message);
+        failed.push({ uid: t.uid, error: e.message });
+      }
+    }
+    res.json({ success: true, dryRun: false, deleted: deleted.length, failed });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
   }
 });
 
