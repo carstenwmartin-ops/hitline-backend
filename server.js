@@ -8,6 +8,7 @@ import { dirname, join } from 'path';
 import { createMailService } from './mail/service.js';
 import { isMailConfigured, missingMailConfig, sendMail } from './mailer.js';
 import { validateConsent } from './consent.js';
+import { PREMIUM_MONTHLY_NOTES, berlinMonthKey, isEligibleForMonthlyNotes } from './premiumNotes.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -1675,6 +1676,68 @@ app.post('/api/premium/refresh-store-subscription', async (req, res) => {
   } catch (e) {
     console.error('❌ refresh-store-subscription:', e.message);
     return res.status(502).json({ error: 'Store-Abgleich fehlgeschlagen' });
+  }
+});
+
+// POST /api/premium/claim-monthly-notes — monatliche Notengutschrift für zahlende Premium-Abos
+// (siehe PREMIUM-ERWEITERUNG.md). Die App ruft das nach dem Login auf; je Kalendermonat (Europe/Berlin)
+// wird höchstens einmal gutgeschrieben. Idempotenz über eine Transaction auf
+// users/{uid}/profile/premiumNotesGrants/{YYYY-MM} (nur per Admin-SDK beschreibbar, siehe database.rules.json).
+// Nicht berechtigt: Familien-Befreiung, gekündigte/abgelaufene Abos. Nicht abgeholte Monate verfallen.
+// Auth: Firebase-ID-Token; uid kommt ausschließlich daraus.
+app.post('/api/premium/claim-monthly-notes', async (req, res) => {
+  const authHeader = req.headers['authorization'] || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+
+  let uid;
+  try {
+    const { default: admin } = await import('firebase-admin');
+    uid = (await admin.auth().verifyIdToken(idToken)).uid;
+  } catch (e) {
+    return res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+  if (!adminDb) return res.status(503).json({ error: 'Nicht konfiguriert' });
+
+  try {
+    const profileRef = adminDb.ref(`users/${uid}/profile`);
+    const subscription = (await profileRef.child('premiumSubscription').once('value')).val();
+    if (!isEligibleForMonthlyNotes(subscription)) {
+      return res.json({ granted: 0, reason: 'not_eligible' });
+    }
+
+    const monthKey = berlinMonthKey();
+    const grantRef = profileRef.child(`premiumNotesGrants/${monthKey}`);
+    const claim = await grantRef.transaction((current) => (current ? undefined : { at: Date.now(), amount: PREMIUM_MONTHLY_NOTES }));
+    if (!claim.committed) {
+      return res.json({ granted: 0, reason: 'already_claimed', month: monthKey });
+    }
+
+    try {
+      let newBalance = null;
+      await profileRef.transaction((profile) => {
+        if (!profile) return profile;
+        newBalance = (profile.coins || 0) + PREMIUM_MONTHLY_NOTES;
+        return {
+          ...profile,
+          coins: newBalance,
+          totalEarned: (profile.totalEarned || 0) + PREMIUM_MONTHLY_NOTES,
+        };
+      });
+      // Protokolleintrag, damit der Noten-Abgleich (coins == 5 + Summe(coinHistory)) für diese Gutschrift stimmt
+      await adminDb.ref(`users/${uid}/coinHistory`).push({
+        ts: Date.now(), amount: PREMIUM_MONTHLY_NOTES, reason: `premium-monthly:${monthKey}`, balance: newBalance,
+      });
+      console.log(`🎁 ${PREMIUM_MONTHLY_NOTES} Premium-Noten für uid=${uid} gutgeschrieben (${monthKey})`);
+      return res.json({ granted: PREMIUM_MONTHLY_NOTES, month: monthKey });
+    } catch (e) {
+      // Gutschrift nicht erfolgt: Monatssperre lösen, damit der nächste Abruf es erneut versucht
+      await grantRef.remove().catch(() => {});
+      throw e;
+    }
+  } catch (e) {
+    console.error('❌ claim-monthly-notes:', e.message);
+    return res.status(500).json({ error: 'Gutschrift fehlgeschlagen' });
   }
 });
 
