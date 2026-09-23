@@ -1101,6 +1101,71 @@ app.get('/api/admin/testflight-users', async (req, res) => {
   }
 });
 
+// POST /api/admin/mark-tester { uid?, email? } — Admin-only: markiert einen Nutzer manuell als
+// TestFlight-Tester (profile.testChannel = 'ios-testflight'). Ergänzt den automatischen Abgleich
+// über config/testflightTesters (siehe App.jsx) für Fälle, in denen die dort hinterlegte
+// TestFlight-Einladungs-E-Mail NICHT mit dem Login-Konto in der App übereinstimmt — praktisch
+// erwartbar bei "Mit Apple anmelden" mit versteckter E-Mail (Apple erzeugt dafür eine private,
+// app-spezifische Weiterleitungsadresse, die Carsten vorher nicht kennt) oder wenn der Tester sich
+// per Google statt mit seiner TestFlight-Apple-ID einloggt. Setzt NICHT zurück, wenn testChannel
+// schon gesetzt ist (kein versehentliches Überschreiben eines abweichenden Werts).
+app.post('/api/admin/mark-tester', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const { uid: uidInput, email: emailInput } = req.body || {};
+    if (!uidInput && !emailInput) return res.status(400).json({ error: 'uid oder email angeben' });
+
+    let userRecord;
+    try {
+      userRecord = uidInput
+        ? await admin.auth().getUser(uidInput.trim())
+        : await admin.auth().getUserByEmail(emailInput.trim());
+    } catch (e) {
+      return res.status(404).json({ error: 'Kein Nutzer mit dieser uid/E-Mail gefunden' });
+    }
+
+    const profileRef = adminDb.ref(`users/${userRecord.uid}/profile`);
+    const existing = (await profileRef.once('value')).val() || {};
+    if (existing.testChannel) {
+      return res.json({ success: true, uid: userRecord.uid, email: userRecord.email || null, alreadySet: existing.testChannel });
+    }
+    await profileRef.update({ testChannel: 'ios-testflight', testChannelSetAt: Date.now() });
+    res.json({ success: true, uid: userRecord.uid, email: userRecord.email || null, testChannel: 'ios-testflight' });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/mark-all-existing-as-testers — Admin-only, für den Livegang gedacht: markiert
+// ALLE zu diesem Zeitpunkt bestehenden Nutzer mit einem Profil (also jede/r, die sich schon einmal
+// eingeloggt hat) als TestFlight-Tester, sofern noch nicht markiert. Danach ist jedes NEU
+// angelegte Konto automatisch ein echter Produktiv-Nutzer — sauberer Cutover ohne die einzelnen
+// Beta-Konten vorher mühsam einzeln nachpflegen zu müssen. Einmalige, bewusste Aktion (kein Cron).
+app.post('/api/admin/mark-all-existing-as-testers', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const usersSnap = await adminDb.ref('users').once('value');
+    const allUsers = usersSnap.val() || {};
+    const now = Date.now();
+    const updates = {};
+    let marked = 0;
+    for (const uid of Object.keys(allUsers)) {
+      if (!allUsers[uid]?.profile) continue; // kein Profil = nie eingeloggt gewesen
+      if (allUsers[uid].profile.testChannel) continue; // schon markiert
+      updates[`${uid}/profile/testChannel`] = 'ios-testflight';
+      updates[`${uid}/profile/testChannelSetAt`] = now;
+      marked++;
+    }
+    if (marked > 0) await adminDb.ref('users').update(updates);
+    res.json({ success: true, checkedUsers: Object.keys(allUsers).length, marked });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // GET /api/admin/feedback — Admin-only: listet alle Einträge aus feedback/ (neuestes zuerst),
 // gefüllt vom Feedback-Formular (siehe src/components/FeedbackForm.jsx, nur für TestFlight-Tester
 // sichtbar). database.rules.json erlaubt Lesen von feedback/ ausschließlich per Admin-SDK.
