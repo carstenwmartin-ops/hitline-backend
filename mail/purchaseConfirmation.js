@@ -42,7 +42,7 @@ export const buildPurchaseConfirmation = (p) => {
   const widerruf = LEGAL.widerruf;
   const consentWhen = p.consent?.givenAt ? formatDateTime(p.consent.givenAt) : null;
 
-  const subject = `Bestellbestätigung: ${p.productName} – Hitlines: Songflow`;
+  const subject = `Bestellbestätigung: ${p.productName} – Hitlines`;
 
   // ── Bausteine (jeweils Text + HTML) ──────────────────────────────────────────────
   const orderRows = [
@@ -75,7 +75,7 @@ export const buildPurchaseConfirmation = (p) => {
   // ── Klartext ─────────────────────────────────────────────────────────────────────
   const line = '────────────────────────────────────────';
   const t = [];
-  t.push('Hallo,', '', 'vielen Dank für deine Bestellung bei Hitlines: Songflow. Hiermit bestätigen wir den Abschluss des Vertrags.', '');
+  t.push('Hallo,', '', 'vielen Dank für deine Bestellung bei Hitlines. Hiermit bestätigen wir den Abschluss des Vertrags.', '');
   t.push('DEINE BESTELLUNG', line);
   for (const [k, v] of orderRows) t.push(`${k}: ${v}`);
   t.push('', 'LEISTUNG', line, deliveryText, '');
@@ -105,7 +105,7 @@ export const buildPurchaseConfirmation = (p) => {
 <body style="margin:0;background:#f3f5f7;font-family:Arial,Helvetica,sans-serif;color:#1e262d;">
 <div style="max-width:680px;margin:0 auto;padding:24px 16px;">
 <div style="background:#ffffff;border-radius:12px;padding:24px 28px;">
-${h('h1', 'Hitlines: Songflow', 'font-size:20px;margin:0 0 4px;color:#050312;')}
+${h('h1', 'Hitlines', 'font-size:20px;margin:0 0 4px;color:#050312;')}
 ${para('Hallo,')}
 ${para('vielen Dank für deine Bestellung. Hiermit bestätigen wir den Abschluss des Vertrags.')}
 ${sec('Deine Bestellung')}

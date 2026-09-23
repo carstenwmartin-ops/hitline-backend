@@ -758,7 +758,7 @@ app.post('/api/create-checkout', async (req, res) => {
       line_items: [{
         price_data: {
           currency: pkg.currency,
-          product_data: { name: `Hitlines: ${pkg.name}`, description: `${pkg.coins} Noten für Hitlines: Songflow` },
+          product_data: { name: `Hitlines: ${pkg.name}`, description: `${pkg.coins} Noten für Hitlines` },
           unit_amount: pkg.price,
         },
         quantity: 1,
