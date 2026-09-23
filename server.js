@@ -1065,6 +1065,59 @@ app.get('/api/admin/coins-discrepancy-check', async (req, res) => {
   }
 });
 
+// Prüft das ID-Token und die Admin-E-Mail — kleine Hilfsfunktion, damit die beiden Endpoints
+// unten (testflight-users, feedback) nicht denselben Block dreimal wiederholen.
+const requireAdmin = async (req) => {
+  const authHeader = req.headers['authorization'] || '';
+  const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!idToken) { const e = new Error('Kein Auth-Token'); e.status = 401; throw e; }
+  const { default: admin } = await import('firebase-admin');
+  const decoded = await admin.auth().verifyIdToken(idToken);
+  if (decoded.email !== 'carstenwmartin@gmail.com') { const e = new Error('Nicht berechtigt'); e.status = 403; throw e; }
+  return decoded;
+};
+
+// GET /api/admin/testflight-users — Admin-only: listet alle Nutzer mit gesetztem
+// profile.testChannel (siehe IOS-TESTFLIGHT-BETA.md) samt E-Mail. Grundlage für ein gezieltes
+// Aufräumen (POST /api/account/delete je uid) nach Ende einer TestFlight-Beta.
+app.get('/api/admin/testflight-users', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const usersSnap = await adminDb.ref('users').once('value');
+    const allUsers = usersSnap.val() || {};
+    const results = [];
+    for (const uid of Object.keys(allUsers)) {
+      const testChannel = allUsers[uid]?.profile?.testChannel;
+      if (!testChannel) continue;
+      let email = '(unbekannt)';
+      try { email = (await admin.auth().getUser(uid)).email || '(keine E-Mail)'; } catch {}
+      results.push({ uid, email, testChannel, testChannelSetAt: allUsers[uid]?.profile?.testChannelSetAt || null });
+    }
+    res.json({ success: true, testers: results });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// GET /api/admin/feedback — Admin-only: listet alle Einträge aus feedback/ (neuestes zuerst),
+// gefüllt vom Feedback-Formular (siehe src/components/FeedbackForm.jsx, nur für TestFlight-Tester
+// sichtbar). database.rules.json erlaubt Lesen von feedback/ ausschließlich per Admin-SDK.
+app.get('/api/admin/feedback', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const snap = await adminDb.ref('feedback').orderByChild('createdAt').once('value');
+    const entries = [];
+    snap.forEach((child) => { entries.push({ id: child.key, ...child.val() }); });
+    entries.reverse(); // neuestes zuerst
+    res.json({ success: true, feedback: entries });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // Baut aus dem gespeicherten Schlüsseltext ein gültiges PEM (PKCS#8): egal ob die BEGIN/END-Zeilen
 // fehlen, die Zeilenumbrüche als literales \n gespeichert oder beim Einfügen zu Leerzeichen wurden.
 const normalizePrivateKey = (raw) => {
@@ -1397,6 +1450,10 @@ const handleRevenueCatSubscriptionEvent = async (event, res) => {
           willRenew: true,
           billingIssue: false,
           store: event.store || null,
+          // 'SANDBOX' bei TestFlight/internen Testkäufen, 'PRODUCTION' bei echten Store-Käufen —
+          // liefert RevenueCat auf jedem Event mit, bisher nur geloggt. Für die Trennung von
+          // Testern/Umsatzstatistik siehe IOS-TESTFLIGHT-BETA.md.
+          environment: event.environment || null,
         });
         break;
       case 'CANCELLATION':
