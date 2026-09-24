@@ -967,6 +967,16 @@ app.get('/api/admin/complimentary-list', async (req, res) => {
   }
 });
 
+// Protokolleintrag für serverseitige Noten-Gutschriften (Anti-Cheat-Abgleich: coins == 5 + Summe(coinHistory)
+// und Anzeige im Noten-Verlauf der App). Fehler hier dürfen die Gutschrift selbst nie blockieren.
+async function logServerCoinHistory(uid, amount, reason, balance) {
+  try {
+    await adminDb.ref(`users/${uid}/coinHistory`).push({ ts: Date.now(), amount, reason, balance: balance ?? null });
+  } catch (e) {
+    console.error('⚠️ coinHistory-Eintrag fehlgeschlagen:', e.message);
+  }
+}
+
 // POST /api/coins/sync-delta — Coins/totalEarned serverseitig gutschreiben (Anti-Cheat-
 // Zwischenlösung, 2026-08-27). Ersetzt den bisherigen direkten Client-Firebase-Write (den
 // database.rules.json inzwischen verbietet). Validiert NICHT jede Runde einzeln (das wäre
@@ -1468,14 +1478,17 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
       }
 
       const profileRef = adminDb.ref(`users/${uid}/profile`);
+      let balanceAfter = null;
       await profileRef.transaction(profile => {
-        if (!profile) return { coins: coinsToAdd, totalEarned: coinsToAdd };
+        if (!profile) { balanceAfter = coinsToAdd; return { coins: coinsToAdd, totalEarned: coinsToAdd }; }
+        balanceAfter = (profile.coins || 0) + coinsToAdd;
         return {
           ...profile,
-          coins: (profile.coins || 0) + coinsToAdd,
+          coins: balanceAfter,
           totalEarned: (profile.totalEarned || 0) + coinsToAdd,
         };
       });
+      await logServerCoinHistory(uid, coinsToAdd, `Noten gekauft: ${coinsToAdd} 🎵`, balanceAfter);
       console.log(`✅ ${coinsToAdd} Coins für uid=${uid} gutgeschrieben`);
       await mailService.enqueue(uid, session.id);
       res.json({ received: true });
@@ -1725,9 +1738,7 @@ app.post('/api/premium/claim-monthly-notes', async (req, res) => {
         };
       });
       // Protokolleintrag, damit der Noten-Abgleich (coins == 5 + Summe(coinHistory)) für diese Gutschrift stimmt
-      await adminDb.ref(`users/${uid}/coinHistory`).push({
-        ts: Date.now(), amount: PREMIUM_MONTHLY_NOTES, reason: `premium-monthly:${monthKey}`, balance: newBalance,
-      });
+      await logServerCoinHistory(uid, PREMIUM_MONTHLY_NOTES, `Hitlines Premium: Monatsnoten ${monthKey} 🎁`, newBalance);
       console.log(`🎁 ${PREMIUM_MONTHLY_NOTES} Premium-Noten für uid=${uid} gutgeschrieben (${monthKey})`);
       return res.json({ granted: PREMIUM_MONTHLY_NOTES, month: monthKey });
     } catch (e) {
@@ -1793,6 +1804,7 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
     const coinsToAdd = pkg.coins;
     const profileRef = adminDb.ref(`users/${uid}/profile`);
     let alreadyProcessed = false;
+    let rcBalanceAfter = null;
     await profileRef.transaction(profile => {
       // RevenueCat stellt Events at-least-once zu — dieselbe Kauf-Transaktion kann
       // mehrfach ankommen. transaction_id gegen bereits verarbeitete IDs prüfen,
@@ -1804,7 +1816,8 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
         return profile; // unverändert lassen
       }
       const nextProcessed = transactionId ? { ...processed, [transactionId]: true } : processed;
-      if (!profile) return { coins: coinsToAdd, totalEarned: coinsToAdd, processedRevenueCatTransactions: nextProcessed };
+      if (!profile) { rcBalanceAfter = coinsToAdd; return { coins: coinsToAdd, totalEarned: coinsToAdd, processedRevenueCatTransactions: nextProcessed }; }
+      rcBalanceAfter = (profile.coins || 0) + coinsToAdd;
       return {
         ...profile,
         coins: (profile.coins || 0) + coinsToAdd,
@@ -1815,6 +1828,7 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
     if (alreadyProcessed) {
       console.log(`↩️ RevenueCat-Webhook: Transaktion ${transactionId} bereits verarbeitet, übersprungen`);
     } else {
+      await logServerCoinHistory(uid, coinsToAdd, `Noten gekauft: ${coinsToAdd} 🎵`, rcBalanceAfter);
       console.log(`✅ ${coinsToAdd} Coins (RevenueCat) für uid=${uid} gutgeschrieben`);
     }
     res.json({ received: true });
@@ -1856,6 +1870,7 @@ app.post('/api/redeem-promo', async (req, res) => {
     // Coins gutschreiben + Einlösung markieren — Check-and-Set ATOMAR innerhalb der Transaction,
     // damit zwei gleichzeitige Anfragen mit demselben Code nicht doppelt gutgeschrieben werden können.
     let alreadyRedeemed = false;
+    let promoBalanceAfter = null;
     const profileRef = adminDb.ref(`users/${uid}/profile`);
     await profileRef.transaction(profile => {
       const p = profile || {};
@@ -1864,6 +1879,7 @@ app.post('/api/redeem-promo', async (req, res) => {
         alreadyRedeemed = true;
         return; // abbrechen, nichts ändern
       }
+      promoBalanceAfter = (p.coins || 0) + coinsToAdd;
       return {
         ...p,
         coins: (p.coins || 0) + coinsToAdd,
@@ -1875,6 +1891,8 @@ app.post('/api/redeem-promo', async (req, res) => {
     if (alreadyRedeemed) {
       return res.status(400).json({ error: 'Code wurde bereits eingelöst' });
     }
+
+    await logServerCoinHistory(uid, coinsToAdd, `Promo-Code eingelöst: ${normalizedCode}`, promoBalanceAfter);
 
     // Globalen Einlösungszähler erhöhen (unkritisch, kein exaktes Atomic-Cap nötig)
     await codeRef.child('redeemedCount').transaction(n => (n || 0) + 1);
