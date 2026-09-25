@@ -9,6 +9,7 @@ import { createMailService } from './mail/service.js';
 import { isMailConfigured, missingMailConfig, sendMail } from './mailer.js';
 import { validateConsent } from './consent.js';
 import { PREMIUM_MONTHLY_NOTES, berlinMonthKey, isEligibleForMonthlyNotes } from './premiumNotes.js';
+import { ROOM_CODE_RE, buildJoinPush, canSendRoomPush } from './roomPush.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -700,6 +701,11 @@ const sendApplePush = (deviceToken, { title, body }) => new Promise((resolve, re
 
 // POST /api/send-push — { uid, title, body }
 app.post('/api/send-push', async (req, res) => {
+  try {
+    await requireAdmin(req);
+  } catch (e) {
+    return res.status(e.status || 401).json({ error: e.message || 'Nicht berechtigt' });
+  }
   const { uid, title, body } = req.body || {};
   if (!uid || !title || !body) return res.status(400).json({ error: 'uid, title und body erforderlich' });
   if (!adminDb) return res.status(500).json({ error: 'Firebase Admin nicht konfiguriert' });
@@ -1835,6 +1841,82 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
   } catch (e) {
     console.error('❌ Firebase Schreib-Fehler (RevenueCat-Webhook):', e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// =====================================================================
+// MITSPIELERSUCHE: Push an den wartenden Host
+// Der Host (angemeldet, iOS) meldet seinen Raum an (register-host, ID-Token). Tritt jemand über die
+// öffentliche Suche bei, ruft dessen App notify-host auf. Die Host-UID liegt nur serverseitig in
+// roomHosts/{code} (Regeln: kein Client-Zugriff), nie in der öffentlich lesbaren openRooms-Liste.
+// Missbrauchsschutz: nur echte Spieler des Raums, feste Textvorlage mit bereinigtem Namen,
+// Mindestabstand und Höchstzahl je Raum (roomPush.js).
+// =====================================================================
+app.post('/api/room/register-host', async (req, res) => {
+  try {
+    const idToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    const roomCode = String(req.body?.roomCode || '').toUpperCase();
+    if (!ROOM_CODE_RE.test(roomCode)) return res.status(400).json({ error: 'Ungültiger Raumcode' });
+    const lang = req.body?.lang === 'en' ? 'en' : 'de';
+    const ref = adminDb.ref(`roomHosts/${roomCode}`);
+    const existing = (await ref.once('value')).val();
+    // Bestehende Anmeldung eines anderen Kontos nicht überschreiben (Raumcode-Kapern), außer sie ist alt
+    if (existing && existing.uid !== decoded.uid && Date.now() - (existing.createdAt || 0) < 4 * 60 * 60 * 1000) {
+      return res.status(409).json({ error: 'Raumcode bereits vergeben' });
+    }
+    await ref.set({ uid: decoded.uid, lang, createdAt: Date.now(), pushCount: 0, lastPushAt: 0 });
+    res.json({ registered: true });
+  } catch (e) {
+    console.error('❌ register-host:', e.message);
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
+app.post('/api/room/notify-host', async (req, res) => {
+  try {
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const roomCode = String(req.body?.roomCode || '').toUpperCase();
+    const playerId = String(req.body?.playerId || '');
+    if (!ROOM_CODE_RE.test(roomCode) || !playerId || playerId.length > 80) return res.status(400).json({ error: 'Ungültige Angaben' });
+
+    const metaRef = adminDb.ref(`roomHosts/${roomCode}`);
+    const meta = (await metaRef.once('value')).val();
+    if (!meta?.uid) return res.json({ sent: false, reason: 'no-host' });
+    if (!canSendRoomPush(meta)) return res.json({ sent: false, reason: 'rate' });
+
+    const [playersSnap, openSnap, tokenSnap] = await Promise.all([
+      adminDb.ref(`rooms/${roomCode}/players`).once('value'),
+      adminDb.ref(`openRooms/${roomCode}`).once('value'),
+      adminDb.ref(`users/${meta.uid}/profile/pushToken`).once('value'),
+    ]);
+    const players = playersSnap.val() || {};
+    const player = players[playerId];
+    if (!player || player.isHost) return res.json({ sent: false, reason: 'not-a-player' });
+    const deviceToken = tokenSnap.val();
+    if (!deviceToken) return res.json({ sent: false, reason: 'no-token' });
+
+    // Zähler atomar erhöhen, bevor gesendet wird (verhindert doppelte Sendungen bei gleichzeitigen Beitritten)
+    let allowed = false;
+    await metaRef.transaction((cur) => {
+      if (!cur) return cur;
+      if (!canSendRoomPush(cur)) return cur;
+      allowed = true;
+      return { ...cur, pushCount: (cur.pushCount || 0) + 1, lastPushAt: Date.now() };
+    });
+    if (!allowed) return res.json({ sent: false, reason: 'rate' });
+
+    const joined = Object.keys(players).length;
+    const desired = Number(openSnap.val()?.desiredPlayers) || 0;
+    const message = buildJoinPush({ lang: meta.lang, name: player.name, joined, desired });
+    const result = await sendApplePush(deviceToken, message);
+    res.json({ sent: !!result.success });
+  } catch (e) {
+    console.error('❌ notify-host:', e.message);
+    res.status(500).json({ error: 'Benachrichtigung fehlgeschlagen' });
   }
 });
 
