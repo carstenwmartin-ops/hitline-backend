@@ -10,6 +10,7 @@ import { isMailConfigured, missingMailConfig, sendMail } from './mailer.js';
 import { validateConsent } from './consent.js';
 import { PREMIUM_MONTHLY_NOTES, berlinMonthKey, isEligibleForMonthlyNotes } from './premiumNotes.js';
 import { ROOM_CODE_RE, buildJoinPush, canSendRoomPush } from './roomPush.js';
+import { APNS_HOSTS, apnsOrder, isBadDeviceToken } from './apnsEnv.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -652,15 +653,11 @@ const getApnsProviderToken = () => {
   return token;
 };
 
-// Sandbox (Xcode-Debug-Builds/TestFlight-Entwicklung) vs. Production (App
-// Store) sind bei APNs getrennte Endpunkte — der Key selbst deckt laut
-// Portal-Konfiguration beide ab, die Umgebung wird hier ueber eine Env-Var
-// gewaehlt, bis die App tatsaechlich im App Store ist (dann auf 'production'
-// umstellen).
-const sendApplePush = (deviceToken, { title, body }) => new Promise((resolve, reject) => {
-  const host = process.env.APNS_ENVIRONMENT === 'production'
-    ? 'https://api.push.apple.com'
-    : 'https://api.sandbox.push.apple.com';
+// APNs hat getrennte Server: Production (TestFlight, App Store) und Sandbox (Xcode-Debug-Builds).
+// Der Key deckt laut Portal-Konfiguration beide ab; ein Token gehoert aber zu genau einer Umgebung.
+// Siehe sendApplePush unten: bevorzugte Umgebung (APNS_ENVIRONMENT, Standard production) zuerst,
+// bei BadDeviceToken automatisch die andere.
+const sendApplePushTo = (host, deviceToken, { title, body }) => new Promise((resolve, reject) => {
   const bundleId = process.env.APPLE_BUNDLE_ID || 'com.hitlines.songflow';
 
   let providerToken;
@@ -698,6 +695,16 @@ const sendApplePush = (deviceToken, { title, body }) => new Promise((resolve, re
   req.write(JSON.stringify({ aps: { alert: { title, body }, sound: 'default' } }));
   req.end();
 });
+
+// Ein Token gehört zu genau einer APNs-Umgebung (TestFlight/App Store = Production, Xcode-Debug = Sandbox).
+// Bevorzugte Umgebung (APNS_ENVIRONMENT, sonst Production) zuerst, bei BadDeviceToken einmal die andere.
+const sendApplePush = async (deviceToken, message) => {
+  const [first, second] = apnsOrder(process.env.APNS_ENVIRONMENT);
+  const result = await sendApplePushTo(APNS_HOSTS[first], deviceToken, message);
+  if (!isBadDeviceToken(result)) return result;
+  console.log(`↪️ APNs: Token passt nicht zu ${first}, versuche ${second}`);
+  return sendApplePushTo(APNS_HOSTS[second], deviceToken, message);
+};
 
 // POST /api/send-push — { uid, title, body }
 app.post('/api/send-push', async (req, res) => {
