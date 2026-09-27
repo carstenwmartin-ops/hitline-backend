@@ -11,6 +11,7 @@ import { validateConsent } from './consent.js';
 import { PREMIUM_MONTHLY_NOTES, berlinMonthKey, isEligibleForMonthlyNotes } from './premiumNotes.js';
 import { ROOM_CODE_RE, buildJoinPush, canSendRoomPush } from './roomPush.js';
 import { APNS_HOSTS, apnsOrder, isBadDeviceToken } from './apnsEnv.js';
+import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -827,6 +828,88 @@ const PREMIUM_PRICE_IDS = {
   monthly: () => process.env.STRIPE_PRICE_MONTHLY,
   yearly: () => process.env.STRIPE_PRICE_YEARLY,
 };
+
+// GET /api/purchases — Kaufverlauf für das eigene Konto. Liest denselben Pfad, den auch die Stripe-
+// und RevenueCat-Webhooks befüllen (users/{uid}/purchases). Der Client könnte ihn zwar direkt per
+// Firebase-SDK lesen (database.rules.json erlaubt uid == auth.uid), ein eigener Endpoint hält aber
+// die Server-Antwort schlank (kein internes emailStatus/legal-Feld) und ist der natürliche Ort für
+// den Widerruf gleich mit.
+app.get('/api/purchases', async (req, res) => {
+  try {
+    const idToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const { uid } = await admin.auth().verifyIdToken(idToken);
+    const snap = await adminDb.ref(`users/${uid}/purchases`).once('value');
+    const val = snap.val() || {};
+    const purchases = Object.values(val)
+      .map((p) => ({
+        id: p.id, kind: p.kind, plan: p.plan || null, productName: p.productName,
+        amount: p.amount, currency: p.currency, createdAt: p.createdAt, provider: p.provider,
+        withdrawnAt: p.withdrawnAt || null,
+        canWithdraw: canWithdraw(p).allowed,
+      }))
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    res.json({ purchases });
+  } catch (e) {
+    console.error('❌ /api/purchases:', e.message);
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
+// POST /api/purchases/withdraw — Widerruf eines Web-Kaufs. Siehe withdrawal.js für die Regeln:
+// Noten sind mit der Zustimmung zum sofortigen Beginn bereits vollständig geliefert (Widerrufsrecht
+// erloschen), beim Abo wird die Kündigung sofort wirksam (nicht erst zum Laufzeitende); der geschuldete
+// Wertersatz wird bewusst NICHT automatisch berechnet oder per Stripe erstattet, solange die
+// Berechnungsformel nicht mit der Kanzlei abgestimmt ist (REFUND_STATUS_PENDING → manuelle Prüfung).
+app.post('/api/purchases/withdraw', async (req, res) => {
+  try {
+    const idToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const { uid } = await admin.auth().verifyIdToken(idToken);
+
+    const purchaseId = String(req.body?.purchaseId || '');
+    if (!purchaseId) return res.status(400).json({ error: 'purchaseId erforderlich' });
+
+    const ref = adminDb.ref(`users/${uid}/purchases/${purchaseId}`);
+    const purchase = (await ref.once('value')).val();
+    const check = canWithdraw(purchase);
+    if (!check.allowed) return res.status(check.reason === 'not_found' ? 404 : 409).json({ error: check.reason });
+
+    // Ab hier: kind === 'premium', innerhalb der Frist, noch nicht widerrufen.
+    if (purchase.provider === 'stripe') {
+      try {
+        const profileSnap = await adminDb.ref(`users/${uid}/profile/premiumSubscription`).once('value');
+        const stripeSubscriptionId = profileSnap.val()?.stripeSubscriptionId;
+        if (stripeSubscriptionId) {
+          const { default: Stripe } = await import('stripe');
+          const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+          await stripe.subscriptions.cancel(stripeSubscriptionId);
+        }
+      } catch (e) {
+        // Ist das Abo bei Stripe bereits beendet (z.B. durch den Kunden selbst), zählt der Widerruf
+        // trotzdem: der Zugriff soll so oder so enden, das ist unten ohnehin der Fall.
+        console.warn('⚠️ Stripe-Kündigung beim Widerruf fehlgeschlagen (Widerruf wird trotzdem vermerkt):', e.message);
+      }
+    }
+
+    const withdrawnAt = Date.now();
+    await ref.update({ withdrawnAt, refundStatus: REFUND_STATUS_PENDING });
+    await adminDb.ref(`users/${uid}/profile/premiumSubscription`).update({
+      status: 'canceled', willRenew: false, canceledAt: withdrawnAt, canceledReason: 'withdrawal',
+    }).catch(() => {});
+
+    await mailService.enqueue(uid, purchaseId, 'withdrawalConfirmation');
+    console.log(`↩️ Widerruf verarbeitet: uid=${uid} purchaseId=${purchaseId}`);
+    res.json({ withdrawn: true, refundStatus: REFUND_STATUS_PENDING });
+  } catch (e) {
+    console.error('❌ /api/purchases/withdraw:', e.message);
+    res.status(500).json({ error: 'Widerruf fehlgeschlagen' });
+  }
+});
 
 // POST /api/create-subscription-checkout — Stripe Checkout Session fürs Abo erstellen
 app.post('/api/create-subscription-checkout', async (req, res) => {
