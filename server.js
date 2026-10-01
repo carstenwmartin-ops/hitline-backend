@@ -48,7 +48,10 @@ const sanitizePrompt = (prompt) => prompt
 // Hilfsfunktion: LLM via OpenRouter aufrufen (OpenAI-kompatibel)
 // temperature optional niedrig ansetzen für faktenkritische Aufgaben (reduziert Halluzinationen)
 const callClaude = async (system, userContent, maxTokens = 2000, temperature) => {
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  // EU-only-Endpoint: Anfragen werden ausschließlich innerhalb der EU verarbeitet und nur
+  // an Anbieter mit EU-Standort weitergeleitet — vermeidet die Drittland-Übermittlungsfrage
+  // für diesen Datenfluss (siehe kanzlei/EIGENE-ERGAENZUNGEN-C2.md, Punkt 5).
+  const response = await fetch('https://eu.openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -447,7 +450,8 @@ app.get('/api/config', (req, res) => {
 // IMMER fehl (falscher Key-Typ für die native Anthropic-API), was den One-Truth-Fallback auf
 // "Quiz" in JEDER Runde auslöste. Jetzt konsistent über OpenRouter wie callClaude().
 const callClaudeHaiku = async (system, userContent, maxTokens = 400, temperature) => {
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  // EU-only-Endpoint, siehe Kommentar bei callClaude()
+  const response = await fetch('https://eu.openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
