@@ -1277,6 +1277,68 @@ app.post('/api/admin/mark-all-existing-as-testers', async (req, res) => {
   }
 });
 
+// POST /api/admin/moderate — Admin-only: Moderation nach einer Meldung (Apple Guideline 1.2).
+// Aktionen: remove-stage (Eintrag in der öffentlichen Suche und den Raum löschen), disable-host
+// (Konto des Stage-Hosts sperren, aufgelöst über roomHosts/{code}, plus Stage löschen),
+// disable-user / enable-user (Konto per E-Mail sperren bzw. entsperren), reset-name (Anzeigename zurücksetzen).
+app.post('/api/admin/moderate', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const action = String(req.body?.action || '');
+    const roomCode = String(req.body?.roomCode || '').toUpperCase();
+    const email = String(req.body?.email || '').trim().toLowerCase();
+
+    const removeStage = async (code) => {
+      await adminDb.ref(`openRooms/${code}`).remove();
+      await adminDb.ref(`rooms/${code}`).remove();
+    };
+    // Den Admin selbst nie sperren
+    const assertNotAdmin = (mail) => { if (mail === 'carstenwmartin@gmail.com') { const e = new Error('Das Admin-Konto kann nicht gesperrt werden'); e.status = 400; throw e; } };
+
+    if (action === 'remove-stage') {
+      if (!ROOM_CODE_RE.test(roomCode)) return res.status(400).json({ error: 'Ungültiger Raumcode' });
+      await removeStage(roomCode);
+      console.log(`🛡️ Moderation: Stage ${roomCode} entfernt`);
+      return res.json({ success: true });
+    }
+    if (action === 'disable-host') {
+      if (!ROOM_CODE_RE.test(roomCode)) return res.status(400).json({ error: 'Ungültiger Raumcode' });
+      const meta = (await adminDb.ref(`roomHosts/${roomCode}`).once('value')).val();
+      if (!meta?.uid) return res.status(404).json({ error: 'Kein angemeldeter Host zu dieser Stage bekannt (Gast oder Stage schon abgelaufen)' });
+      const user = await admin.auth().getUser(meta.uid);
+      assertNotAdmin((user.email || '').toLowerCase());
+      await admin.auth().updateUser(meta.uid, { disabled: true });
+      await admin.auth().revokeRefreshTokens(meta.uid);
+      await removeStage(roomCode);
+      console.log(`🛡️ Moderation: Host-Konto ${meta.uid} gesperrt, Stage ${roomCode} entfernt`);
+      return res.json({ success: true, email: user.email || null });
+    }
+    if (action === 'disable-user' || action === 'enable-user') {
+      if (!email) return res.status(400).json({ error: 'E-Mail erforderlich' });
+      assertNotAdmin(email);
+      const user = await admin.auth().getUserByEmail(email);
+      const disabled = action === 'disable-user';
+      await admin.auth().updateUser(user.uid, { disabled });
+      if (disabled) await admin.auth().revokeRefreshTokens(user.uid);
+      console.log(`🛡️ Moderation: Konto ${user.uid} ${disabled ? 'gesperrt' : 'entsperrt'}`);
+      return res.json({ success: true, uid: user.uid, disabled });
+    }
+    if (action === 'reset-name') {
+      if (!email) return res.status(400).json({ error: 'E-Mail erforderlich' });
+      const user = await admin.auth().getUserByEmail(email);
+      await admin.auth().updateUser(user.uid, { displayName: 'Spieler' });
+      await adminDb.ref(`users/${user.uid}/profile/displayName`).set('Spieler').catch(() => {});
+      return res.json({ success: true, uid: user.uid });
+    }
+    return res.status(400).json({ error: 'Unbekannte Aktion' });
+  } catch (e) {
+    console.error('❌ /api/admin/moderate:', e.message);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // GET /api/admin/feedback — Admin-only: listet alle Einträge aus feedback/ (neuestes zuerst),
 // gefüllt vom Feedback-Formular (siehe src/components/FeedbackForm.jsx, nur für TestFlight-Tester
 // sichtbar). database.rules.json erlaubt Lesen von feedback/ ausschließlich per Admin-SDK.
