@@ -873,6 +873,7 @@ app.get('/api/purchases', async (req, res) => {
         id: p.id, kind: p.kind, plan: p.plan || null, productName: p.productName,
         amount: p.amount, currency: p.currency, createdAt: p.createdAt, provider: p.provider,
         withdrawnAt: p.withdrawnAt || null,
+        store: p.store || null, environment: p.environment || null,
         canWithdraw: canWithdraw(p).allowed,
       }))
       .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
