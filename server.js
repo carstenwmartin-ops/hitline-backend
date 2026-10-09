@@ -12,6 +12,7 @@ import { PREMIUM_MONTHLY_NOTES, berlinMonthKey, isEligibleForMonthlyNotes } from
 import { ROOM_CODE_RE, buildJoinPush, canSendRoomPush } from './roomPush.js';
 import { APNS_HOSTS, apnsOrder, isBadDeviceToken } from './apnsEnv.js';
 import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
+import { handleCoinRefund } from './storeRefund.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -1961,6 +1962,21 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
 
   if (PREMIUM_SUBSCRIPTION_PRODUCT_IDS.includes(event.product_id)) {
     return handleRevenueCatSubscriptionEvent(event, res);
+  }
+
+  // Store-Erstattung eines Noten-Kaufs: Noten wieder abziehen (siehe storeRefund.js). Vorsicht: Das echte Ereignisformat
+  // bei Einmalkäufen wurde noch nicht an einem realen Fall gesehen — die Zeile oben loggt jedes Ereignis.
+  if (event.type === 'CANCELLATION' && adminDb) {
+    try {
+      const r = await handleCoinRefund({ adminDb, packages: await getCoinPackages(), logHistory: logServerCoinHistory }, event);
+      if (r.handled) {
+        console.log(`↩️ RevenueCat-Erstattung: status=${r.status} abgezogen=${r.deducted ?? 0} uid=${event.app_user_id || '-'}`);
+        return res.json({ received: true });
+      }
+    } catch (e) {
+      console.error('❌ RevenueCat-Erstattung Fehler:', e.message);
+      return res.status(500).json({ error: e.message });
+    }
   }
 
   if (event.type !== 'NON_RENEWING_PURCHASE') {
