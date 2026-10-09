@@ -25,6 +25,8 @@ export const REFUND_STATUS_PENDING = 'pending_manual_calculation';
 export const canWithdraw = (purchase, now = Date.now()) => {
   if (!purchase) return { allowed: false, reason: 'not_found' };
   if (purchase.withdrawnAt) return { allowed: false, reason: 'already_withdrawn' };
+  // App-Store-/Play-Käufe: Erstattung und Widerruf laufen über Apple bzw. Google, nicht über uns.
+  if (purchase.provider === 'revenuecat') return { allowed: false, reason: 'store_purchase' };
   if (purchase.kind === 'coins') return { allowed: false, reason: 'digital_content_delivered' };
   const age = now - (purchase.createdAt || 0);
   if (age > WITHDRAWAL_WINDOW_MS || age < 0) return { allowed: false, reason: 'expired' };

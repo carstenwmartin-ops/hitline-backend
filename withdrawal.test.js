@@ -32,3 +32,9 @@ test('Kaufdatum in der Zukunft wird abgelehnt (Datenfehler)', () => {
   const now = Date.now();
   assert.deepEqual(canWithdraw({ kind: 'premium', createdAt: now + 10000 }, now), { allowed: false, reason: 'expired' });
 });
+
+test('Store-Käufe (RevenueCat): kein Widerruf über uns', () => {
+  const now = Date.now();
+  assert.deepEqual(canWithdraw({ kind: 'premium', provider: 'revenuecat', createdAt: now }, now), { allowed: false, reason: 'store_purchase' });
+  assert.deepEqual(canWithdraw({ kind: 'coins', provider: 'revenuecat', createdAt: now }, now), { allowed: false, reason: 'store_purchase' });
+});

@@ -828,6 +828,27 @@ const claimPurchase = async (uid, record) => {
 };
 const releasePurchase = async (uid, id) => { try { await adminDb.ref(`users/${uid}/purchases/${id}`).remove(); } catch (e) { /* ignorieren */ } };
 
+// Store-Kauf (App Store/Google Play über RevenueCat) im Kaufverlauf vermerken. Nur Anzeige: Gutschrift und
+// Abo-Status laufen unabhängig davon, ein Fehler hier darf den Webhook nie scheitern lassen.
+const recordStorePurchase = async (uid, event, { kind, productName, plan = null }) => {
+  try {
+    const id = String(event.transaction_id || event.id || '');
+    if (!id || !uid || !adminDb) return;
+    const price = Number(event.price_in_purchased_currency);
+    await claimPurchase(uid, {
+      id, kind, plan, productName,
+      amount: Number.isFinite(price) ? Math.round(price * 100) : null,
+      currency: (event.currency || 'eur').toLowerCase(),
+      createdAt: event.purchased_at_ms || Date.now(),
+      provider: 'revenuecat',
+      store: event.store || null,
+      environment: event.environment || null,
+    });
+  } catch (e) {
+    console.warn('⚠️ Store-Kauf konnte nicht im Kaufverlauf vermerkt werden:', e.message);
+  }
+};
+
 const PREMIUM_PRICE_IDS = {
   monthly: () => process.env.STRIPE_PRICE_MONTHLY,
   yearly: () => process.env.STRIPE_PRICE_YEARLY,
@@ -1752,6 +1773,10 @@ const handleRevenueCatSubscriptionEvent = async (event, res) => {
       case 'RENEWAL':
       case 'PRODUCT_CHANGE':
       case 'UNCANCELLATION':
+        if (event.type === 'INITIAL_PURCHASE' || event.type === 'RENEWAL') {
+          const yearly = /yearly/i.test(event.product_id || '');
+          await recordStorePurchase(uid, event, { kind: 'premium', plan: yearly ? 'yearly' : 'monthly', productName: `Hitlines Premium (${yearly ? 'jährlich' : 'monatlich'})` });
+        }
         await ref.set({
           status: 'active',
           provider: 'revenuecat',
@@ -1991,6 +2016,7 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
       console.log(`↩️ RevenueCat-Webhook: Transaktion ${transactionId} bereits verarbeitet, übersprungen`);
     } else {
       await logServerCoinHistory(uid, coinsToAdd, `Noten gekauft: ${coinsToAdd} 🎵`, rcBalanceAfter);
+      await recordStorePurchase(uid, event, { kind: 'coins', productName: `${coinsToAdd} Noten${pkg.label ? ' (' + pkg.label + ')' : ''}` });
       console.log(`✅ ${coinsToAdd} Coins (RevenueCat) für uid=${uid} gutgeschrieben`);
     }
     res.json({ received: true });
