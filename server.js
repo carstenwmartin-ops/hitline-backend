@@ -13,6 +13,7 @@ import { ROOM_CODE_RE, buildJoinPush, canSendRoomPush } from './roomPush.js';
 import { APNS_HOSTS, apnsOrder, isBadDeviceToken } from './apnsEnv.js';
 import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
 import { handleCoinRefund } from './storeRefund.js';
+import { signTicket, verifyTicket, summarizeGuest, transferGuestNotes } from './guestTransfer.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -831,13 +832,13 @@ const releasePurchase = async (uid, id) => { try { await adminDb.ref(`users/${ui
 
 // Store-Kauf (App Store/Google Play über RevenueCat) im Kaufverlauf vermerken. Nur Anzeige: Gutschrift und
 // Abo-Status laufen unabhängig davon, ein Fehler hier darf den Webhook nie scheitern lassen.
-const recordStorePurchase = async (uid, event, { kind, productName, plan = null }) => {
+const recordStorePurchase = async (uid, event, { kind, productName, plan = null, coins = null }) => {
   try {
     const id = String(event.transaction_id || event.id || '');
     if (!id || !uid || !adminDb) return;
     const price = Number(event.price_in_purchased_currency);
     await claimPurchase(uid, {
-      id, kind, plan, productName,
+      id, kind, plan, productName, ...(coins ? { coins } : {}),
       amount: Number.isFinite(price) ? Math.round(price * 100) : null,
       currency: (event.currency || 'eur').toLowerCase(),
       createdAt: event.purchased_at_ms || Date.now(),
@@ -2033,13 +2034,62 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
       console.log(`↩️ RevenueCat-Webhook: Transaktion ${transactionId} bereits verarbeitet, übersprungen`);
     } else {
       await logServerCoinHistory(uid, coinsToAdd, `Noten gekauft: ${coinsToAdd} 🎵`, rcBalanceAfter);
-      await recordStorePurchase(uid, event, { kind: 'coins', productName: `${coinsToAdd} Noten${pkg.label ? ' (' + pkg.label + ')' : ''}` });
+      await recordStorePurchase(uid, event, { kind: 'coins', coins: coinsToAdd, productName: `${coinsToAdd} Noten${pkg.label ? ' (' + pkg.label + ')' : ''}` });
       console.log(`✅ ${coinsToAdd} Coins (RevenueCat) für uid=${uid} gutgeschrieben`);
     }
     res.json({ received: true });
   } catch (e) {
     console.error('❌ Firebase Schreib-Fehler (RevenueCat-Webhook):', e.message);
     res.status(500).json({ error: e.message });
+  }
+});
+
+// =====================================================================
+// GAST-KONTO → KONTO: gekaufte Noten übernehmen (siehe guestTransfer.js)
+// Ablauf: VOR der Anmeldung im vorhandenen Konto holt die App mit dem Token des anonymen Gast-Kontos ein Ticket; NACH
+// der Anmeldung und nach Zustimmung der Person löst sie es mit dem Token des Zielkontos ein.
+// =====================================================================
+const guestTransferSecret = () => process.env.GUEST_TRANSFER_SECRET || process.env.REVENUECAT_WEBHOOK_SECRET || '';
+
+app.post('/api/guest/transfer-ticket', async (req, res) => {
+  try {
+    const idToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const secret = guestTransferSecret();
+    if (!secret) return res.status(500).json({ error: 'Übertrag nicht konfiguriert' });
+    const { default: admin } = await import('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    // nur anonyme Gast-Konten dürfen ein Ticket holen
+    if (decoded.firebase?.sign_in_provider !== 'anonymous') return res.status(403).json({ error: 'Kein Gast-Konto' });
+    const summary = await summarizeGuest(adminDb, decoded.uid);
+    if (!summary.coins && !summary.premium) return res.json({ ticket: null, coins: 0, premium: false });
+    res.json({ ticket: signTicket(decoded.uid, secret), coins: summary.coins, premium: summary.premium });
+  } catch (e) {
+    console.error('❌ guest/transfer-ticket:', e.message);
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
+  }
+});
+
+app.post('/api/guest/transfer-claim', async (req, res) => {
+  try {
+    const idToken = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (!idToken) return res.status(401).json({ error: 'Kein Auth-Token' });
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const secret = guestTransferSecret();
+    if (!secret) return res.status(500).json({ error: 'Übertrag nicht konfiguriert' });
+    const { default: admin } = await import('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(idToken);
+    // Ziel muss ein echtes (nicht anonymes) Konto sein
+    if (decoded.firebase?.sign_in_provider === 'anonymous') return res.status(403).json({ error: 'Zielkonto ist ein Gast-Konto' });
+    const guestUid = verifyTicket(req.body?.ticket, secret);
+    if (!guestUid) return res.status(400).json({ error: 'Ticket ungültig oder abgelaufen' });
+    const r = await transferGuestNotes({ adminDb, guestUid, targetUid: decoded.uid, logHistory: logServerCoinHistory });
+    console.log(`🔁 Gast-Übertrag: ${r.transferred} Noten von ${guestUid} nach ${decoded.uid}`);
+    res.json({ transferred: r.transferred });
+  } catch (e) {
+    console.error('❌ guest/transfer-claim:', e.message);
+    res.status(401).json({ error: 'Token ungültig oder abgelaufen' });
   }
 });
 
