@@ -4,8 +4,10 @@
 // einem BEREITS vorhandenen Konto an, wechselt die Konto-ID und die gekauften Noten blieben im Gast-Konto zurück.
 // Ablauf: (1) VOR dem Wechsel holt die App mit dem Token des Gast-Kontos ein kurzlebiges, signiertes Ticket.
 // (2) NACH der Anmeldung (und nur nach Zustimmung der Person) schickt sie Ticket + Token des Zielkontos zurück.
-// Übertragen werden nur GEKAUFTE Noten (Kaufeinträge), nie erspielte (Tagesgrenze gegen Missbrauch). Jeder Kaufeintrag
-// wird einzeln "geclaimt" (transferredTo) — dadurch ist der Übertrag idempotent, auch bei doppeltem Aufruf.
+// Übertragen werden nur GEKAUFTE Noten, nie erspielte (Tagesgrenze gegen Missbrauch), und nur der AKTUELL GÜLTIGE Stand:
+// Beim Ausgeben gelten erspielte Noten zuerst, gekaufte zuletzt. Von P gekauften Noten sind bei einem Guthaben B daher noch
+// min(P, B) übrig (wer fast alles ausgegeben hat, bekommt entsprechend weniger übertragen, nicht das ganze Paket).
+// Der Übertrag ist einmalig und idempotent: ein Marker am Gast-Konto (guestTransfer) verhindert einen zweiten Durchlauf.
 
 import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
 
@@ -46,51 +48,64 @@ export const coinsOfPurchase = (p) => {
 export const transferablePurchases = (purchases) => Object.values(purchases || {})
   .filter((p) => p && p.kind === 'coins' && p.provider === 'revenuecat' && !p.refundedAt && !p.transferredTo && coinsOfPurchase(p) > 0);
 
+// Noch gültige gekaufte Noten: min(gekaufte Summe, aktuelles Guthaben) — erspielte werden zuerst ausgegeben.
+export const remainingPurchased = (purchasedSum, balance) => Math.max(0, Math.min(purchasedSum || 0, balance || 0));
+
 export const summarizeGuest = async (adminDb, guestUid) => {
   const purchases = (await adminDb.ref(`users/${guestUid}/purchases`).once('value')).val() || {};
-  const sub = (await adminDb.ref(`users/${guestUid}/profile/premiumSubscription`).once('value')).val();
-  const list = transferablePurchases(purchases);
+  const profile = (await adminDb.ref(`users/${guestUid}/profile`).once('value')).val() || {};
+  const sub = profile.premiumSubscription;
+  const already = (await adminDb.ref(`users/${guestUid}/guestTransfer`).once('value')).val();
+  const purchasedSum = transferablePurchases(purchases).reduce((n, p) => n + coinsOfPurchase(p), 0);
   return {
-    coins: list.reduce((n, p) => n + coinsOfPurchase(p), 0),
-    premium: !!(sub && sub.status === 'active' && sub.provider === 'revenuecat'),
+    coins: already ? 0 : remainingPurchased(purchasedSum, profile.coins),
+    premium: !already && !!(sub && sub.status === 'active' && sub.provider === 'revenuecat'),
   };
 };
 
 /**
- * Überträgt die gekauften Noten des Gast-Kontos auf das Zielkonto.
+ * Überträgt die noch gültigen gekauften Noten des Gast-Kontos auf das Zielkonto (einmalig).
  * @returns {{transferred: number}} tatsächlich übertragene Noten (0, wenn schon übertragen oder nichts vorhanden)
  */
 export const transferGuestNotes = async ({ adminDb, guestUid, targetUid, logHistory }) => {
   if (!guestUid || !targetUid || guestUid === targetUid) return { transferred: 0 };
+
+  // Einmalig: Marker am Gast-Konto (Transaktion). Wer ihn nicht setzen kann, war zu spät.
+  let first = false;
+  await adminDb.ref(`users/${guestUid}/guestTransfer`).transaction((cur) => {
+    if (cur) return undefined;
+    first = true;
+    return { to: targetUid, at: Date.now() };
+  });
+  if (!first) return { transferred: 0 };
+
   const purchases = (await adminDb.ref(`users/${guestUid}/purchases`).once('value')).val() || {};
-  let transferred = 0;
-  for (const p of transferablePurchases(purchases)) {
-    // Einzeln beanspruchen: nur wer das Feld als Erster setzt, darf gutschreiben (idempotent)
-    let claimed = false;
-    await adminDb.ref(`users/${guestUid}/purchases/${p.id}/transferredTo`).transaction((cur) => {
-      if (cur) return undefined;
-      claimed = true;
-      return targetUid;
-    });
-    if (!claimed) continue;
-    const n = coinsOfPurchase(p);
-    let targetBalance = null;
-    await adminDb.ref(`users/${targetUid}/profile`).transaction((profile) => {
-      const base = profile || {};
-      targetBalance = (base.coins || 0) + n;
-      return { ...base, coins: targetBalance, totalEarned: (base.totalEarned || 0) + n };
-    });
-    let guestBalance = null;
-    await adminDb.ref(`users/${guestUid}/profile`).transaction((profile) => {
-      if (!profile) return profile;
-      guestBalance = Math.max(0, (profile.coins || 0) - n);
-      return { ...profile, coins: guestBalance };
-    });
-    if (logHistory) {
-      await logHistory(targetUid, n, `Übernommen aus Gast-Konto: ${n} 🎵`, targetBalance);
-      await logHistory(guestUid, -n, `Übertragen in Konto: ${n} 🎵`, guestBalance);
-    }
-    transferred += n;
+  const list = transferablePurchases(purchases);
+  const purchasedSum = list.reduce((n, p) => n + coinsOfPurchase(p), 0);
+  const guestProfile = (await adminDb.ref(`users/${guestUid}/profile`).once('value')).val() || {};
+  const n = remainingPurchased(purchasedSum, guestProfile.coins);
+
+  // alle gekauften Einträge als erledigt markieren (auch ein bereits ausgegebener Rest wird nicht später übertragen)
+  for (const p of list) {
+    await adminDb.ref(`users/${guestUid}/purchases/${p.id}`).update({ transferredTo: targetUid });
   }
-  return { transferred };
+  if (n <= 0) return { transferred: 0 };
+
+  let targetBalance = null;
+  await adminDb.ref(`users/${targetUid}/profile`).transaction((profile) => {
+    const base = profile || {};
+    targetBalance = (base.coins || 0) + n;
+    return { ...base, coins: targetBalance, totalEarned: (base.totalEarned || 0) + n };
+  });
+  let guestBalance = null;
+  await adminDb.ref(`users/${guestUid}/profile`).transaction((profile) => {
+    if (!profile) return profile;
+    guestBalance = Math.max(0, (profile.coins || 0) - n);
+    return { ...profile, coins: guestBalance };
+  });
+  if (logHistory) {
+    await logHistory(targetUid, n, `Übernommen aus Gast-Konto: ${n} 🎵`, targetBalance);
+    await logHistory(guestUid, -n, `Übertragen in Konto: ${n} 🎵`, guestBalance);
+  }
+  return { transferred: n };
 };

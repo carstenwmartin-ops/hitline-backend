@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { signTicket, verifyTicket, coinsOfPurchase, transferablePurchases, summarizeGuest, transferGuestNotes, TICKET_TTL_MS } from './guestTransfer.js';
+import { signTicket, verifyTicket, coinsOfPurchase, transferablePurchases, summarizeGuest, transferGuestNotes, remainingPurchased, TICKET_TTL_MS } from './guestTransfer.js';
 
 // Künstliche Firebase-Datenbank (Speicher im Objekt): ref(path).once()/transaction()/update()
 const fakeDb = (initial = {}) => {
@@ -62,9 +62,19 @@ test('nur Store-Notenkäufe ohne Erstattung/Übertrag sind übertragbar', () => 
   assert.deepEqual(list.map((p) => p.id), ['t1']);
 });
 
-test('Zusammenfassung des Gast-Kontos', async () => {
+test('übrige gekaufte Noten = min(gekauft, Guthaben)', () => {
+  assert.equal(remainingPurchased(50, 55), 50);
+  assert.equal(remainingPurchased(50, 5), 5);
+  assert.equal(remainingPurchased(50, 0), 0);
+  assert.equal(remainingPurchased(0, 99), 0);
+  assert.equal(remainingPurchased(undefined, undefined), 0);
+});
+
+test('Zusammenfassung des Gast-Kontos (unverbraucht, teilweise ausgegeben, Premium)', async () => {
   const db = guestWorld();
   assert.deepEqual(await summarizeGuest(db, 'guest'), { coins: 50, premium: false });
+  db.data.users.guest.profile.coins = 5; // fast alles ausgegeben
+  assert.equal((await summarizeGuest(db, 'guest')).coins, 5);
   db.data.users.guest.profile.premiumSubscription = { status: 'active', provider: 'revenuecat' };
   assert.equal((await summarizeGuest(db, 'guest')).premium, true);
 });
@@ -81,12 +91,30 @@ test('Übertrag: Noten wandern, Verlauf auf beiden Seiten, Kaufeintrag markiert'
   assert.deepEqual(history, [{ u: 'target', a: 50, b: 533 }, { u: 'guest', a: -50, b: 5 }]);
 });
 
-test('Übertrag ist idempotent (zweiter Aufruf überträgt nichts)', async () => {
+test('fast alles ausgegeben: nur der Rest wird übertragen, nicht das ganze Paket', async () => {
+  const db = guestWorld();
+  db.data.users.guest.profile.coins = 5; // 50 gekauft, aber nur 5 übrig
+  const r = await transferGuestNotes({ adminDb: db, guestUid: 'guest', targetUid: 'target' });
+  assert.equal(r.transferred, 5);
+  assert.equal(db.data.users.target.profile.coins, 488);
+  assert.equal(db.data.users.guest.profile.coins, 0);
+  // der ausgegebene Rest kann später nicht mehr übertragen werden
+  assert.equal(db.data.users.guest.purchases.t1.transferredTo, 'target');
+});
+
+test('Übertrag ist einmalig und idempotent', async () => {
   const db = guestWorld();
   await transferGuestNotes({ adminDb: db, guestUid: 'guest', targetUid: 'target' });
   const again = await transferGuestNotes({ adminDb: db, guestUid: 'guest', targetUid: 'target' });
   assert.equal(again.transferred, 0);
   assert.equal(db.data.users.target.profile.coins, 533);
+  // auch nicht an ein anderes Konto
+  db.data.users.other = { profile: { coins: 1 } };
+  const third = await transferGuestNotes({ adminDb: db, guestUid: 'guest', targetUid: 'other' });
+  assert.equal(third.transferred, 0);
+  assert.equal(db.data.users.other.profile.coins, 1);
+  // und die Zusammenfassung zeigt nichts mehr an
+  assert.equal((await summarizeGuest(db, 'guest')).coins, 0);
 });
 
 test('Gast gleich Ziel oder fehlende Angaben: nichts passiert', async () => {
@@ -96,9 +124,11 @@ test('Gast gleich Ziel oder fehlende Angaben: nichts passiert', async () => {
   assert.equal(db.data.users.target.profile.coins, 483);
 });
 
-test('Guthaben des Gast-Kontos fällt nie unter 0 (schon ausgegeben)', async () => {
+test('Guthaben null: nichts wird übertragen, Käufe gelten trotzdem als erledigt', async () => {
   const db = guestWorld();
-  db.data.users.guest.profile.coins = 12;
-  await transferGuestNotes({ adminDb: db, guestUid: 'guest', targetUid: 'target' });
-  assert.equal(db.data.users.guest.profile.coins, 0);
+  db.data.users.guest.profile.coins = 0;
+  const r = await transferGuestNotes({ adminDb: db, guestUid: 'guest', targetUid: 'target' });
+  assert.equal(r.transferred, 0);
+  assert.equal(db.data.users.target.profile.coins, 483);
+  assert.equal(db.data.users.guest.purchases.t1.transferredTo, 'target');
 });
