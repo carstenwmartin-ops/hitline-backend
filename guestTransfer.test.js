@@ -132,3 +132,19 @@ test('Guthaben null: nichts wird übertragen, Käufe gelten trotzdem als erledig
   assert.equal(db.data.users.target.profile.coins, 483);
   assert.equal(db.data.users.guest.purchases.t1.transferredTo, 'target');
 });
+
+test('Übertrag legt den Kaufeintrag im Zielkonto an (Kaufverlauf), aber nicht erneut übertragbar', async () => {
+  const db = guestWorld();
+  await transferGuestNotes({ adminDb: db, guestUid: 'guest', targetUid: 'target' });
+  const copy = db.data.users.target.purchases.t1;
+  assert.equal(copy.transferredFrom, 'guest');
+  assert.equal(copy.transferredTo, undefined);
+  assert.equal(transferablePurchases(db.data.users.target.purchases).length, 0);
+});
+
+test('nichts übertragen (Guthaben 0): keine Kopie im Zielkonto', async () => {
+  const db = guestWorld();
+  db.data.users.guest.profile.coins = 0;
+  await transferGuestNotes({ adminDb: db, guestUid: 'guest', targetUid: 'target' });
+  assert.equal(db.data.users.target.purchases, undefined);
+});

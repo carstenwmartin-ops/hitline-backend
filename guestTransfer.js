@@ -46,7 +46,7 @@ export const coinsOfPurchase = (p) => {
 
 // Übertragbare Käufe: Noten, über den Store gekauft, nicht erstattet, noch nicht übertragen.
 export const transferablePurchases = (purchases) => Object.values(purchases || {})
-  .filter((p) => p && p.kind === 'coins' && p.provider === 'revenuecat' && !p.refundedAt && !p.transferredTo && coinsOfPurchase(p) > 0);
+  .filter((p) => p && p.kind === 'coins' && p.provider === 'revenuecat' && !p.refundedAt && !p.transferredTo && !p.transferredFrom && coinsOfPurchase(p) > 0);
 
 // Noch gültige gekaufte Noten: min(gekaufte Summe, aktuelles Guthaben) — erspielte werden zuerst ausgegeben.
 export const remainingPurchased = (purchasedSum, balance) => Math.max(0, Math.min(purchasedSum || 0, balance || 0));
@@ -90,6 +90,10 @@ export const transferGuestNotes = async ({ adminDb, guestUid, targetUid, logHist
     await adminDb.ref(`users/${guestUid}/purchases/${p.id}`).update({ transferredTo: targetUid });
   }
   if (n <= 0) return { transferred: 0 };
+  // Kopie im Zielkonto, damit der Kaufverlauf dort den Kauf zeigt (Erstattungen markieren beide Einträge)
+  for (const p of list) {
+    await adminDb.ref(`users/${targetUid}/purchases/${p.id}`).update({ ...p, transferredFrom: guestUid });
+  }
 
   let targetBalance = null;
   await adminDb.ref(`users/${targetUid}/profile`).transaction((profile) => {

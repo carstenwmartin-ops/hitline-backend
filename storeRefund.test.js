@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isCoinRefundEvent, applyRefundToProfile, handleCoinRefund } from './storeRefund.js';
+import { isCoinRefundEvent, applyRefundToProfile, handleCoinRefund, refundCandidateUids } from './storeRefund.js';
 
 const PACKAGES = [
   { id: 'coins_40', coins: 40, label: 'Solo' },
@@ -20,6 +20,7 @@ const fakeDb = (initial = {}) => {
   return {
     data,
     ref: (path) => ({
+      once: async () => ({ val: () => get(path) ?? null }),
       transaction: async (fn) => { const next = fn(get(path) ?? null); if (next !== undefined) set(path, next); return { committed: true }; },
       update: async (patch) => { set(path, { ...(get(path) || {}), ...patch }); },
     }),
@@ -99,4 +100,62 @@ test('fremde Ereignisse werden nicht behandelt', async () => {
   const r = await handleCoinRefund({ adminDb: db, packages: PACKAGES, logHistory: async () => {} }, refundEvent({ cancel_reason: 'UNSUBSCRIBE' }));
   assert.equal(r.handled, false);
   assert.equal(db.data.users.uid1.profile.coins, 50);
+});
+
+// ───── Gast-Kauf, in ein Konto übernommen, und Suche unter alten Konto-IDs ─────
+test('Konto-IDs: letzte, ursprüngliche und frühere, ohne anonyme RevenueCat-IDs', () => {
+  assert.deepEqual(
+    refundCandidateUids({ app_user_id: 'b', original_app_user_id: 'a', aliases: ['a', 'b', '$RCAnonymousID:x', 'c'] }),
+    ['b', 'a', 'c'],
+  );
+  assert.deepEqual(refundCandidateUids({}), []);
+});
+
+test('Erstattung findet den Kauf unter der Gast-ID, obwohl app_user_id das neue Konto nennt', async () => {
+  const db = fakeDb({
+    users: {
+      guest: { profile: { coins: 5, processedRevenueCatTransactions: { 'tx-1': true } }, purchases: { 'tx-1': { id: 'tx-1', transferredTo: 'konto' } } },
+      konto: { profile: { coins: 533 }, purchases: { 'tx-1': { id: 'tx-1', transferredFrom: 'guest' } } },
+    },
+  });
+  const history = [];
+  const logHistory = async (uid, amount, reason, bal) => { history.push({ uid, amount, bal }); };
+  const r = await handleCoinRefund({ adminDb: db, packages: PACKAGES, logHistory },
+    refundEvent({ product_id: 'coins_40', app_user_id: 'konto', original_app_user_id: 'guest', aliases: ['guest', 'konto'] }));
+  // 40 erstattet: 5 im Gast-Konto, der Rest (35) im Zielkonto
+  assert.equal(r.status, 'refunded');
+  assert.equal(r.deducted, 5);
+  assert.equal(r.targetDeducted, 35);
+  assert.equal(db.data.users.guest.profile.coins, 0);
+  assert.equal(db.data.users.konto.profile.coins, 498);
+  assert.ok(db.data.users.guest.purchases['tx-1'].refundedAt > 0);
+  assert.ok(db.data.users.konto.purchases['tx-1'].refundedAt > 0);
+  assert.deepEqual(history, [{ uid: 'guest', amount: -5, bal: 0 }, { uid: 'konto', amount: -35, bal: 498 }]);
+});
+
+test('übernommener Kauf: Zielkonto fällt nicht unter 0', async () => {
+  const db = fakeDb({
+    users: {
+      guest: { profile: { coins: 0, processedRevenueCatTransactions: { 'tx-1': true } }, purchases: { 'tx-1': { id: 'tx-1', transferredTo: 'konto' } } },
+      konto: { profile: { coins: 10 } },
+    },
+  });
+  const r = await handleCoinRefund({ adminDb: db, packages: PACKAGES, logHistory: async () => {} }, refundEvent({ product_id: 'coins_40', app_user_id: 'guest' }));
+  assert.equal(r.targetDeducted, 10);
+  assert.equal(db.data.users.konto.profile.coins, 0);
+  // Kopie fehlt im Zielkonto: es wird kein Stummel-Eintrag angelegt
+  assert.equal(db.data.users.konto.purchases, undefined);
+});
+
+test('kein übernommener Kauf: Zielkonto bleibt unberührt', async () => {
+  const db = fakeDb({
+    users: {
+      uid1: { profile: { coins: 20, processedRevenueCatTransactions: { 'tx-1': true } }, purchases: { 'tx-1': { id: 'tx-1' } } },
+      konto: { profile: { coins: 500 } },
+    },
+  });
+  const r = await handleCoinRefund({ adminDb: db, packages: PACKAGES, logHistory: async () => {} }, refundEvent({ product_id: 'coins_40' }));
+  assert.equal(r.deducted, 20);
+  assert.equal(r.targetDeducted, 0);
+  assert.equal(db.data.users.konto.profile.coins, 500);
 });

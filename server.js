@@ -875,6 +875,8 @@ app.get('/api/purchases', async (req, res) => {
         id: p.id, kind: p.kind, plan: p.plan || null, productName: p.productName,
         amount: p.amount, currency: p.currency, createdAt: p.createdAt, provider: p.provider,
         withdrawnAt: p.withdrawnAt || null,
+        refundedAt: p.refundedAt || null,
+        transferredFrom: p.transferredFrom ? true : false,
         store: p.store || null, environment: p.environment || null,
         canWithdraw: canWithdraw(p).allowed,
       }))
@@ -1795,7 +1797,18 @@ const handleRevenueCatSubscriptionEvent = async (event, res) => {
         });
         break;
       case 'CANCELLATION':
-        await ref.update({ willRenew: false });
+        if (event.cancel_reason === 'CUSTOMER_SUPPORT') {
+          // Erstattung (oder Kündigung durch den Store-Support): Zugriff endet sofort, nicht erst mit der Laufzeit.
+          // Ein späteres INITIAL_PURCHASE/RENEWAL setzt das Abo wieder auf aktiv.
+          await ref.update({ status: 'canceled', willRenew: false, refunded: true, refundedAt: Date.now() });
+          const txId = String(event.transaction_id || '');
+          if (txId) {
+            const purchaseRef = adminDb.ref(`users/${uid}/purchases/${txId}`);
+            if ((await purchaseRef.once('value')).val()) await purchaseRef.update({ refundedAt: Date.now() });
+          }
+        } else {
+          await ref.update({ willRenew: false });
+        }
         break;
       case 'EXPIRATION':
         await ref.update({ status: 'canceled', willRenew: false });
