@@ -14,6 +14,7 @@ import { APNS_HOSTS, apnsOrder, isBadDeviceToken } from './apnsEnv.js';
 import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
 import { handleCoinRefund } from './storeRefund.js';
 import { subscriptionPeriodEndMs } from './stripeSubscription.js';
+import { handleStripeRefund } from './stripeRefund.js';
 import { signTicket, verifyTicket, summarizeGuest, transferGuestNotes } from './guestTransfer.js';
 
 const require = createRequire(import.meta.url);
@@ -1756,6 +1757,24 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
       console.warn(`⚠️ Abo-Zahlung fehlgeschlagen: uid=${uid}`);
     }
     res.json({ received: true });
+  } else if (event.type === 'charge.refunded') {
+    // Erstattung einer Web-Zahlung im Stripe-Dashboard: bei Noten-Käufen die Noten wieder abziehen (siehe stripeRefund.js)
+    if (!adminDb) return res.json({ received: true });
+    try {
+      const { default: Stripe } = await import('stripe');
+      const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+      const r = await handleStripeRefund({
+        adminDb,
+        findSessionByPaymentIntent: async (pi) => (await stripe.checkout.sessions.list({ payment_intent: pi, limit: 1 })).data[0] || null,
+        logHistory: logServerCoinHistory,
+      }, event);
+      console.log(`↩️ Stripe-Erstattung: status=${r.status || '-'} abgezogen=${r.deducted ?? 0}`);
+      res.json({ received: true });
+    } catch (e) {
+      // 500 → Stripe stellt erneut zu; die Verarbeitung ist idempotent
+      console.error('❌ Stripe-Erstattung Fehler:', e.message);
+      res.status(500).json({ error: e.message });
+    }
   } else {
     res.json({ received: true });
   }
