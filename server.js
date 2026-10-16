@@ -13,6 +13,7 @@ import { ROOM_CODE_RE, buildJoinPush, canSendRoomPush } from './roomPush.js';
 import { APNS_HOSTS, apnsOrder, isBadDeviceToken } from './apnsEnv.js';
 import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
 import { handleCoinRefund } from './storeRefund.js';
+import { subscriptionPeriodEndMs } from './stripeSubscription.js';
 import { signTicket, verifyTicket, summarizeGuest, transferGuestNotes } from './guestTransfer.js';
 
 const require = createRequire(import.meta.url);
@@ -1705,7 +1706,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
         status: sub.status,
         provider: 'stripe',
         priceId: sub.items?.data?.[0]?.price?.id || null,
-        currentPeriodEnd: sub.current_period_end ? sub.current_period_end * 1000 : null,
+        currentPeriodEnd: subscriptionPeriodEndMs(sub),
         willRenew: !sub.cancel_at_period_end,
         billingIssue: sub.status === 'past_due',
         stripeCustomerId: sub.customer,
