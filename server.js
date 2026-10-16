@@ -15,6 +15,7 @@ import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
 import { handleCoinRefund } from './storeRefund.js';
 import { subscriptionPeriodEndMs } from './stripeSubscription.js';
 import { handleStripeRefund } from './stripeRefund.js';
+import { classifyAccount, DEFAULT_CUTOFF_MS } from './testAccountCleanup.js';
 import { signTicket, verifyTicket, summarizeGuest, transferGuestNotes } from './guestTransfer.js';
 
 const require = createRequire(import.meta.url);
@@ -1576,6 +1577,60 @@ app.post('/api/admin/delete-testers', async (req, res) => {
         failed.push({ uid: t.uid, error: e.message });
       }
     }
+    res.json({ success: true, dryRun: false, deleted: deleted.length, failed });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/cleanup-test-accounts — Admin-only. Räumt Testkonten MIT STICHTAG auf (siehe testAccountCleanup.js).
+// Body: { cutoff?: ISO-Datum, includeActive?: bool, includeAppleRelay?: bool, confirm?: bool, expectedCount?: number }
+// Ohne confirm nur Vorschau. Mit confirm:true UND expectedCount (= Zahl der aktuellen Kandidaten, sonst 409) wird gelöscht.
+// Echte Käufe (PRODUCTION/Stripe live), Konten nach dem Stichtag, der Admin und gewöhnliche Konten sind immer geschützt.
+app.post('/api/admin/cleanup-test-accounts', async (req, res) => {
+  try {
+    const decoded = await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const { cutoff, includeActive, includeAppleRelay, confirm, expectedCount } = req.body || {};
+    const cutoffMs = cutoff ? Date.parse(cutoff) : DEFAULT_CUTOFF_MS;
+    if (!Number.isFinite(cutoffMs)) return res.status(400).json({ error: 'Ungültiges Stichtag-Datum' });
+
+    const usersData = (await adminDb.ref('users').once('value')).val() || {};
+    const rows = [];
+    let pageToken;
+    do {
+      const page = await admin.auth().listUsers(1000, pageToken);
+      for (const authUser of page.users) {
+        rows.push(classifyAccount({
+          authUser: { uid: authUser.uid, email: authUser.email || null, providerData: authUser.providerData || [], metadata: authUser.metadata || {} },
+          userData: usersData[authUser.uid] || null,
+          cutoffMs, adminEmail: 'carstenwmartin@gmail.com', adminUid: decoded.uid,
+          includeActive: includeActive === true, includeAppleRelay: includeAppleRelay === true,
+        }));
+      }
+      pageToken = page.pageToken;
+    } while (pageToken);
+
+    const candidates = rows.filter((r) => r.candidate);
+    const activeAfterCutoff = rows.filter((r) => !r.candidate && r.activeAfterCutoff && r.protectedReasons.length === 0);
+    const kept = {};
+    for (const r of rows.filter((x) => !x.candidate)) for (const why of (r.protectedReasons.length ? r.protectedReasons : ['active_after_cutoff'])) kept[why] = (kept[why] || 0) + 1;
+    const view = (r) => ({ uid: r.uid, category: r.category, email: r.email, createdAt: r.createdAt, lastActiveAt: r.lastActiveAt, coins: r.coins, purchases: r.purchases });
+
+    if (confirm !== true) {
+      return res.json({ success: true, dryRun: true, cutoff: new Date(cutoffMs).toISOString(), total: rows.length, count: candidates.length, candidates: candidates.map(view), activeAfterCutoff: activeAfterCutoff.map(view), kept });
+    }
+    if (expectedCount !== candidates.length) {
+      return res.status(409).json({ error: `Die Liste hat sich geändert (jetzt ${candidates.length} Konten) — bitte Vorschau neu laden.` });
+    }
+    const deleted = [];
+    const failed = [];
+    for (const c of candidates) {
+      try { await deleteAccountData(c.uid); deleted.push(c.uid); }
+      catch (e) { console.error(`❌ Testkonto ${c.uid} konnte nicht gelöscht werden:`, e.message); failed.push({ uid: c.uid, error: e.message }); }
+    }
+    console.log(`🧹 Testkonten aufgeräumt: ${deleted.length} gelöscht, ${failed.length} fehlgeschlagen (Stichtag ${new Date(cutoffMs).toISOString()})`);
     res.json({ success: true, dryRun: false, deleted: deleted.length, failed });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
