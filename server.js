@@ -13,6 +13,7 @@ import { ROOM_CODE_RE, buildJoinPush, canSendRoomPush } from './roomPush.js';
 import { APNS_HOSTS, apnsOrder, isBadDeviceToken } from './apnsEnv.js';
 import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
 import { handleCoinRefund } from './storeRefund.js';
+import { fbKey } from './firebaseKey.js';
 import { subscriptionPeriodEndMs } from './stripeSubscription.js';
 import { handleStripeRefund } from './stripeRefund.js';
 import { classifyAccount, DEFAULT_CUTOFF_MS } from './testAccountCleanup.js';
@@ -827,17 +828,17 @@ const mailService = createMailService(() => adminDb);
 // gutgeschrieben (Stripe stellt Webhooks bei Zeitüberschreitung mehrfach zu).
 // Rückgabe: true = neu angelegt, false = war schon vorhanden.
 const claimPurchase = async (uid, record) => {
-  const ref = adminDb.ref(`users/${uid}/purchases/${record.id}`);
+  const ref = adminDb.ref(`users/${uid}/purchases/${fbKey(record.id)}`);
   const result = await ref.transaction((cur) => (cur ? undefined : record));
   return result.committed;
 };
-const releasePurchase = async (uid, id) => { try { await adminDb.ref(`users/${uid}/purchases/${id}`).remove(); } catch (e) { /* ignorieren */ } };
+const releasePurchase = async (uid, id) => { try { await adminDb.ref(`users/${uid}/purchases/${fbKey(id)}`).remove(); } catch (e) { /* ignorieren */ } };
 
 // Store-Kauf (App Store/Google Play über RevenueCat) im Kaufverlauf vermerken. Nur Anzeige: Gutschrift und
 // Abo-Status laufen unabhängig davon, ein Fehler hier darf den Webhook nie scheitern lassen.
 const recordStorePurchase = async (uid, event, { kind, productName, plan = null, coins = null }) => {
   try {
-    const id = String(event.transaction_id || event.id || '');
+    const id = fbKey(event.transaction_id || event.id || '');
     if (!id || !uid || !adminDb) return;
     const price = Number(event.price_in_purchased_currency);
     await claimPurchase(uid, {
@@ -1876,7 +1877,7 @@ const handleRevenueCatSubscriptionEvent = async (event, res) => {
           // Erstattung (oder Kündigung durch den Store-Support): Zugriff endet sofort, nicht erst mit der Laufzeit.
           // Ein späteres INITIAL_PURCHASE/RENEWAL setzt das Abo wieder auf aktiv.
           await ref.update({ status: 'canceled', willRenew: false, refunded: true, refundedAt: Date.now() });
-          const txId = String(event.transaction_id || '');
+          const txId = fbKey(event.transaction_id || '');
           if (txId) {
             const purchaseRef = adminDb.ref(`users/${uid}/purchases/${txId}`);
             if ((await purchaseRef.once('value')).val()) await purchaseRef.update({ refundedAt: Date.now() });
@@ -2075,7 +2076,7 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
 
   const uid = event.app_user_id;
   const productId = event.product_id;
-  const transactionId = event.transaction_id || event.id;
+  const transactionId = fbKey(event.transaction_id || event.id);
   if (!uid || !productId) {
     console.error('❌ RevenueCat-Webhook: fehlende uid/product_id im Event');
     return res.status(400).json({ error: 'Fehlende Event-Daten' });

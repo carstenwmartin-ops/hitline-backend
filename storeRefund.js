@@ -1,3 +1,5 @@
+import { fbKey } from './firebaseKey.js';
+
 // storeRefund.js — Erstattung eines Noten-Kaufs über App Store/Google Play (RevenueCat-Ereignis CANCELLATION).
 //
 // Ziel: Erstattet Apple/Google einen Noten-Kauf, werden dieselben Noten wieder abgezogen (nicht unter 0), im
@@ -19,7 +21,8 @@ export const isCoinRefundEvent = (event, coinPackageIds) =>
 
 // Reine Funktion (läuft in der Firebase-Transaktion): berechnet das neue Profil.
 // Rückgabe: { profile, status: 'refunded' | 'already_refunded' | 'unknown_transaction', deducted }
-export const applyRefundToProfile = (profile, { transactionId, coins }) => {
+export const applyRefundToProfile = (profile, { transactionId: rawTransactionId, coins }) => {
+  const transactionId = fbKey(rawTransactionId);
   if (!profile || !transactionId) return { profile, status: 'unknown_transaction', deducted: 0 };
   const credited = profile.processedRevenueCatTransactions || {};
   const refunded = profile.processedRevenueCatRefunds || {};
@@ -49,7 +52,7 @@ export const refundCandidateUids = (event) => {
 export const handleCoinRefund = async ({ adminDb, packages, logHistory }, event) => {
   const ids = (packages || []).map((p) => p.id);
   if (!isCoinRefundEvent(event, ids)) return { handled: false };
-  const transactionId = String(event.transaction_id || event.original_transaction_id || event.id || '');
+  const transactionId = fbKey(event.transaction_id || event.original_transaction_id || event.id || '');
   const pkg = packages.find((p) => p.id === event.product_id);
   const candidates = refundCandidateUids(event);
   if (!candidates.length || !transactionId || !pkg) return { handled: true, status: 'unknown_transaction', deducted: 0 };
