@@ -14,6 +14,7 @@ import { APNS_HOSTS, apnsOrder, isBadDeviceToken } from './apnsEnv.js';
 import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
 import { handleCoinRefund } from './storeRefund.js';
 import { fbKey } from './firebaseKey.js';
+import { registerDailyRoutes, removeDailyData } from './daily.js';
 import { subscriptionPeriodEndMs } from './stripeSubscription.js';
 import { handleStripeRefund } from './stripeRefund.js';
 import { classifyAccount, DEFAULT_CUTOFF_MS } from './testAccountCleanup.js';
@@ -1107,6 +1108,9 @@ async function logServerCoinHistory(uid, amount, reason, balance) {
   }
 }
 
+// Daily Competition (Tagesrunde, Ranglisten, Trophäen, Ligen) — siehe daily.js
+registerDailyRoutes(app, { getDb: () => adminDb, logCoinHistory: logServerCoinHistory });
+
 // POST /api/coins/sync-delta — Coins/totalEarned serverseitig gutschreiben (Anti-Cheat-
 // Zwischenlösung, 2026-08-27). Ersetzt den bisherigen direkten Client-Firebase-Write (den
 // database.rules.json inzwischen verbietet). Validiert NICHT jede Runde einzeln (das wäre
@@ -1484,6 +1488,10 @@ const deleteAccountData = async (uid, { appleCode = null } = {}) => {
 
     if (customerId) {
       await adminDb.ref(`stripeCustomerLinks/${customerId}`).remove();
+    }
+    // Daily-Competition: Ergebnisse, Ranglisten-Einträge und Liga-Mitgliedschaften (stehen mit Namen außerhalb von users/{uid})
+    try { await removeDailyData(adminDb, uid); } catch (e) {
+      console.warn(`⚠️ Daily-Daten-Löschung bei Konto-Löschung fehlgeschlagen (uid=${uid}):`, e.message);
     }
     await adminDb.ref(`users/${uid}`).remove();
 
