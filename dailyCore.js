@@ -52,6 +52,22 @@ export const previousMonthKey = (dateKey) => {
   return m === 1 ? `${y - 1}-12` : `${y}-${pad(m - 1)}`;
 };
 
+// ─── Aufbewahrung (Datenschutz) ────────────────────────────────────────────────────
+// Tagesergebnisse und Ranglisten enthalten den Anzeigenamen. Sie werden nach diesen Fristen automatisch gelöscht;
+// dieselben Fenster nutzt die Kontolöschung (removeDailyData). Die Datenschutzerklärung nennt diese Fristen.
+export const RETENTION_DAYS = 62;   // Tagesergebnisse: heute und die 62 Tage davor
+export const RETENTION_WEEKS = 10;  // Wochenranglisten: laufende Woche und die 10 davor
+export const RETENTION_MONTHS = 3;  // Monatsranglisten: laufender Monat und die 3 davor
+
+// Ältester Schlüssel, der noch behalten wird (alles davor wird gelöscht)
+export const oldestKeptDay = (today) => addDays(today, -RETENTION_DAYS);
+export const oldestKeptWeek = (today) => weekKeyOf(addDays(today, -7 * RETENTION_WEEKS));
+export const oldestKeptMonth = (today) => {
+  let m = monthKeyOf(today);
+  for (let i = 0; i < RETENTION_MONTHS; i++) m = previousMonthKey(`${m}-01`);
+  return m;
+};
+
 // ─── Wertung ──────────────────────────────────────────────────────────────────
 export const POINTS_PER_CORRECT = 10;
 export const STREAK_BONUS_STEP = 2;
