@@ -13,6 +13,7 @@
 import {
   berlinDateKey, addDays, monthKeyOf, weekKeyOf, previousWeekKey, previousMonthKey, scorePlacements,
   bestOfDays, rankEntries, rewardFor, nextStreak, cleanDisplayName, WEEK_BEST_DAYS, MONTH_BEST_DAYS,
+  RETENTION_DAYS, RETENTION_WEEKS, RETENTION_MONTHS, oldestKeptDay, oldestKeptWeek, oldestKeptMonth,
 } from './dailyCore.js';
 import { pickDailySongs } from './dailyHits.js';
 
@@ -27,13 +28,30 @@ const BOARD_SIZE = 20;
 export async function removeDailyData(db, uid, now = Date.now()) {
   const today = berlinDateKey(now);
   const ops = [];
-  for (let i = 0; i <= 62; i++) ops.push(db.ref(`dailyResults/${addDays(today, -i)}/${uid}`).remove());
-  for (let i = 0; i <= 10; i++) ops.push(db.ref(`dailyBoards/week/${weekKeyOf(addDays(today, -7 * i))}/${uid}`).remove());
+  for (let i = 0; i <= RETENTION_DAYS; i++) ops.push(db.ref(`dailyResults/${addDays(today, -i)}/${uid}`).remove());
+  for (let i = 0; i <= RETENTION_WEEKS; i++) ops.push(db.ref(`dailyBoards/week/${weekKeyOf(addDays(today, -7 * i))}/${uid}`).remove());
   let month = monthKeyOf(today);
-  for (let i = 0; i < 4; i++) { ops.push(db.ref(`dailyBoards/month/${month}/${uid}`).remove()); month = previousMonthKey(`${month}-01`); }
+  for (let i = 0; i <= RETENTION_MONTHS; i++) { ops.push(db.ref(`dailyBoards/month/${month}/${uid}`).remove()); month = previousMonthKey(`${month}-01`); }
   const leagues = (await db.ref(`users/${uid}/daily/leagues`).once('value')).val() || {};
   for (const code of Object.keys(leagues)) ops.push(db.ref(`dailyLeagues/${code}/members/${uid}`).remove());
   await Promise.all(ops);
+}
+
+// Löscht abgelaufene Tagesergebnisse und Ranglisten (Anzeigenamen) nach den Fristen aus dailyCore.js.
+// Schlüssel sind Datum/Woche/Monat mit führenden Nullen, die Reihenfolge nach Schlüssel entspricht also der Zeit.
+export async function purgeExpiredDailyData(db, now = Date.now()) {
+  const today = berlinDateKey(now);
+  const plans = [
+    ['dailyResults', oldestKeptDay(today)],
+    ['dailyBoards/week', oldestKeptWeek(today)],
+    ['dailyBoards/month', oldestKeptMonth(today)],
+  ];
+  for (const [path, oldestKept] of plans) {
+    const snap = await db.ref(path).orderByKey().endAt(oldestKept).once('value');
+    const updates = {};
+    snap.forEach((child) => { if (child.key < oldestKept) updates[child.key] = null; });
+    if (Object.keys(updates).length > 0) await db.ref(path).update(updates);
+  }
 }
 
 export function registerDailyRoutes(app, { getDb, logCoinHistory }) {
@@ -99,7 +117,7 @@ export function registerDailyRoutes(app, { getDb, logCoinHistory }) {
       }
       await finalRef.set({
         at: Date.now(), count: entries.length,
-        top: top.map((e) => ({ name: e.name, score: e.score, place: e.rank })),
+        top: top.map((e) => ({ score: e.score, place: e.rank })), // bewusst ohne Namen (nirgends angezeigt)
       });
     } catch (e) {
       // Nichts halb abgeschlossen lassen: Sperre und frisch vergebene Trophäen lösen, damit der nächste Abruf es erneut versucht
@@ -126,6 +144,7 @@ export function registerDailyRoutes(app, { getDb, logCoinHistory }) {
         if (!(await db().ref(`dailyFinal/week/${week}`).once('value')).exists()) await finalizePeriod('week', week);
         const month = previousMonthKey(today);
         if (!(await db().ref(`dailyFinal/month/${month}`).once('value')).exists()) await finalizePeriod('month', month);
+        await purgeExpiredDailyData(db()).catch((e) => console.error('⚠️ Daily-Aufräumen fehlgeschlagen:', e.message));
         ensuredFor = today;
       } catch (e) {
         console.error('⚠️ Daily-Abschluss fehlgeschlagen:', e.message);
