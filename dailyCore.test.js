@@ -44,11 +44,20 @@ test('scorePlacements: alles richtig gibt Serien-Bonus', () => {
   assert.equal(r.score, 10 + 12 + 14 + 16);
 });
 
-test('scorePlacements: Fehler setzt die Serie zurück, Karte wandert an die richtige Stelle', () => {
-  // 1970 falsch nach rechts (Pos 1), danach ist [1970,1980]; 1990 → Pos 2 richtig
-  const r = scorePlacements(songs, [1, 2, 0, 4]);
+test('scorePlacements: Fehler setzt die Serie zurück, falsche Karte wird verworfen (Classic-Regel)', () => {
+  // 1970 rechts von 1980 = falsch → Zeitleiste bleibt [1980]; 1990 → Pos 1, 1960 → Pos 0, 2000 → Pos 3
+  const r = scorePlacements(songs, [1, 1, 0, 3]);
   assert.equal(r.grid, '0111');
   assert.equal(r.score, 10 + 12 + 14);
+});
+
+test('scorePlacements: nach einer verworfenen Karte ist eine zu große Position ungültig', () => {
+  assert.equal(scorePlacements(songs, [1, 2, 0, 4]), null);
+});
+
+test('scorePlacements: gleiches Jahr zählt als richtig', () => {
+  const same = [1980, 1980, 1990].map((year, i) => ({ artist: 'A' + i, title: 'T' + i, year }));
+  assert.equal(scorePlacements(same, [0, 2]).grid, '11');
 });
 
 test('scorePlacements: ungültige Eingaben ergeben null', () => {
