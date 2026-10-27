@@ -61,7 +61,8 @@ export const MONTH_BEST_DAYS = 20; // Monatswertung: die besten 20 Tage
 
 // songs[0] ist der Start-Song der Zeitleiste, songs[1..] werden der Reihe nach eingeordnet.
 // placements[i] = Position (0..Länge der Zeitleiste), an die Song i+1 gelegt wurde.
-// Falsch Platzierte landen trotzdem an ihrer richtigen Stelle (wie im Hauptspiel).
+// Classic-Regel: richtig platzierte Karten bleiben in der Zeitleiste, falsch platzierte werden verworfen
+// (die Zeitleiste wird dann nicht länger, eine spätere Position außerhalb der Zeitleiste ist ungültig).
 export const scorePlacements = (songs, placements) => {
   if (!Array.isArray(songs) || songs.length < 2 || !Array.isArray(placements)) return null;
   if (placements.length !== songs.length - 1) return null;
@@ -80,13 +81,11 @@ export const scorePlacements = (songs, placements) => {
       streak += 1; correct += 1;
       score += POINTS_PER_CORRECT + Math.min((streak - 1) * STREAK_BONUS_STEP, STREAK_BONUS_MAX);
       grid.push('1');
+      timeline.splice(slot, 0, year);
     } else {
       streak = 0;
       grid.push('0');
     }
-    let idx = timeline.findIndex((y) => y > year);
-    if (idx === -1) idx = timeline.length;
-    timeline.splice(idx, 0, year);
   }
   return { score, correct, total: placements.length, grid: grid.join('') };
 };
