@@ -15,6 +15,7 @@ import { canWithdraw, REFUND_STATUS_PENDING } from './withdrawal.js';
 import { handleCoinRefund } from './storeRefund.js';
 import { fbKey } from './firebaseKey.js';
 import { registerDailyRoutes, removeDailyData } from './daily.js';
+import { isPremiumSubscriptionProduct, isYearlyPremium, findActivePremiumSubscription } from './premiumProducts.js';
 import { subscriptionPeriodEndMs } from './stripeSubscription.js';
 import { handleStripeRefund } from './stripeRefund.js';
 import { classifyAccount, DEFAULT_CUTOFF_MS } from './testAccountCleanup.js';
@@ -600,7 +601,7 @@ const COIN_PACKAGES = [
 // Hitlines-Premium-Abo-Produkte im Store (iOS/Android) — muss 1:1 mit den productId-Werten in
 // src/data/premiumSubscription.js (Frontend) sowie den tatsaechlich in App Store Connect/Play
 // Console angelegten Abo-Produkten uebereinstimmen.
-const PREMIUM_SUBSCRIPTION_PRODUCT_IDS = ['hitlines_premium_monthly', 'hitlines_premium_yearly'];
+// (Liste und Erkennung inkl. Android-Basistarif "<abo-id>:<basistarif>" liegen in premiumProducts.js)
 
 // Firebase Admin initialisieren (nur wenn Credentials vorhanden)
 let adminDb = null;
@@ -1863,7 +1864,7 @@ const handleRevenueCatSubscriptionEvent = async (event, res) => {
       case 'PRODUCT_CHANGE':
       case 'UNCANCELLATION':
         if (event.type === 'INITIAL_PURCHASE' || event.type === 'RENEWAL') {
-          const yearly = /yearly/i.test(event.product_id || '');
+          const yearly = isYearlyPremium(event.product_id);
           await recordStorePurchase(uid, event, { kind: 'premium', plan: yearly ? 'yearly' : 'monthly', productName: `Hitlines Premium (${yearly ? 'jährlich' : 'monatlich'})` });
         }
         await ref.set({
@@ -1941,12 +1942,7 @@ app.post('/api/premium/refresh-store-subscription', async (req, res) => {
     const subs = (await rc.json())?.subscriber?.subscriptions || {};
 
     // Aktives Premium-Abo mit dem spätesten Ablauf suchen
-    let best = null;
-    for (const pid of PREMIUM_SUBSCRIPTION_PRODUCT_IDS) {
-      const sub = subs[pid];
-      const exp = sub ? Date.parse(sub.expires_date) : NaN;
-      if (!Number.isNaN(exp) && exp > Date.now() && (!best || exp > best.exp)) best = { pid, sub, exp };
-    }
+    const best = findActivePremiumSubscription(subs);
 
     const ref = adminDb.ref(`users/${uid}/profile/premiumSubscription`);
     const existing = (await ref.once('value')).val();
@@ -2058,7 +2054,7 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
   // und die Fehlersuche im Render-Log ohne Blick ins RevenueCat-Dashboard moeglich.
   console.log(`📩 RevenueCat-Webhook: type=${event.type} product=${event.product_id || '-'} env=${event.environment || '-'} store=${event.store || '-'} uid=${event.app_user_id || '-'}`);
 
-  if (PREMIUM_SUBSCRIPTION_PRODUCT_IDS.includes(event.product_id)) {
+  if (isPremiumSubscriptionProduct(event.product_id)) {
     return handleRevenueCatSubscriptionEvent(event, res);
   }
 
@@ -2079,6 +2075,9 @@ app.post('/api/revenuecat-webhook', async (req, res) => {
 
   if (event.type !== 'NON_RENEWING_PURCHASE') {
     // Andere Event-Typen (Abo-Lifecycle fuer unbekannte Produkte etc.) betreffen uns nicht.
+    if (['INITIAL_PURCHASE', 'RENEWAL', 'PRODUCT_CHANGE', 'UNCANCELLATION', 'EXPIRATION', 'BILLING_ISSUE'].includes(event.type)) {
+      console.warn(`⚠️ RevenueCat-Webhook: Abo-Event ${event.type} für unbekanntes Produkt "${event.product_id || '-'}" ignoriert`);
+    }
     return res.json({ received: true });
   }
 
