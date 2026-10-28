@@ -19,6 +19,18 @@ export const channelOf = (provider, store) => {
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
+// Zählt ein Kauf als echter Umsatz? Gemeinsame Regel für die Premium-Seite und die Sicht "Heute".
+// Rückgabe: { channel } oder { excluded: 'sandbox' | 'unknownChannel' | 'beforeLaunch' | 'withdrawn' | 'refunded' }
+export const classifyPurchase = (p, launch = LAUNCH_DATES) => {
+  if (p.environment === 'SANDBOX') return { excluded: 'sandbox' };
+  const channel = channelOf(p.provider, p.store);
+  if (!channel) return { excluded: 'unknownChannel' };
+  if (num(p.createdAt) < Date.parse(`${launch[channel]}T00:00:00Z`)) return { excluded: 'beforeLaunch' };
+  if (p.withdrawnAt) return { excluded: 'withdrawn' };
+  if (p.refundedAt) return { excluded: 'refunded' };
+  return { channel };
+};
+
 const emptyByChannel = () => Object.fromEntries(PLATFORMS.map((p) => [p, 0]));
 
 // Tarif eines Abos: 'yearly' | 'monthly' | 'unknown'
@@ -80,12 +92,9 @@ export const buildPremiumStats = (users, {
 
     for (const p of Object.values(acc.purchases || {})) {
       if (!p || typeof p !== 'object') continue;
-      if (p.environment === 'SANDBOX') { excluded.sandbox += 1; continue; }
-      const channel = channelOf(p.provider, p.store);
-      if (!channel) { excluded.unknownChannel += 1; continue; }
-      if (num(p.createdAt) < Date.parse(`${launch[channel]}T00:00:00Z`)) { excluded.beforeLaunch += 1; continue; }
-      if (p.withdrawnAt) { excluded.withdrawn += 1; continue; }
-      if (p.refundedAt) { excluded.refunded += 1; continue; }
+      const verdict = classifyPurchase(p, launch);
+      if (verdict.excluded) { excluded[verdict.excluded] += 1; continue; }
+      const channel = verdict.channel;
       const day = dayKey(num(p.createdAt));
       if (!keySet.has(day)) continue;
       const cents = p.amount === null || p.amount === undefined ? 0 : num(p.amount);
