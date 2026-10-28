@@ -20,6 +20,7 @@ import { subscriptionPeriodEndMs } from './stripeSubscription.js';
 import { handleStripeRefund } from './stripeRefund.js';
 import { classifyAccount, DEFAULT_CUTOFF_MS } from './testAccountCleanup.js';
 import { signTicket, verifyTicket, summarizeGuest, transferGuestNotes } from './guestTransfer.js';
+import { buildGameStats } from './adminStats.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -1223,6 +1224,29 @@ const requireAdmin = async (req) => {
   return decoded;
 };
 
+// GET /api/admin/stats/games?days=7|30|90 — Admin-only: Spielnutzung für das Admin-Dashboard (admin.hitlines.de).
+// Liest nur den Knoten "analytics" (Zähler ohne Personenbezug) und wertet ihn in adminStats.js aus.
+// Kurzer Zwischenspeicher je Zeitraum, damit wiederholte Abrufe Firebase nicht belasten.
+const adminStatsCache = new Map();
+const ADMIN_STATS_TTL_MS = 5 * 60 * 1000;
+app.get('/api/admin/stats/games', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 30;
+    const hit = adminStatsCache.get(days);
+    if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') {
+      return res.json({ ...hit.data, cached: true });
+    }
+    const snap = await adminDb.ref('analytics').once('value');
+    const data = { generatedAt: new Date().toISOString(), ...buildGameStats(snap.val(), { days }) };
+    adminStatsCache.set(days, { at: Date.now(), data });
+    res.json({ ...data, cached: false });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // GET /api/admin/testflight-users — Admin-only: listet alle Nutzer mit gesetztem
 // profile.testChannel (siehe IOS-TESTFLIGHT-BETA.md) samt E-Mail. Grundlage für ein gezieltes
 // Aufräumen (POST /api/account/delete je uid) nach Ende einer TestFlight-Beta.
@@ -2390,6 +2414,7 @@ app.listen(PORT, () => {
   console.log('   POST /api/hitline-playlist-large');
   console.log('   POST /api/hitline-playlist-tracks');
   console.log('   GET  /api/config');
+  console.log('   GET  /api/admin/stats/games');
   console.log('   GET  /api/lastfm-similar');
   console.log('   GET  /health');
 });
