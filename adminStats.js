@@ -5,7 +5,7 @@
 // je Plattform erst ab ihrem Starttag (LAUNCH_DATES). Aufschlüsselungen ohne Datumsdimension (Modus, Spielort, …) lassen sich nicht
 // abgrenzen und werden vom Aufrufer als "enthält Testaufrufe" gekennzeichnet.
 
-const PLATFORMS = ['web', 'ios', 'android'];
+export const PLATFORMS = ['web', 'ios', 'android'];
 
 // Starttage (UTC-Datum) je Plattform. Bei einem weiteren Start (z. B. Web-Relaunch) hier anpassen.
 export const LAUNCH_DATES = { web: '2026-10-15', ios: '2026-10-15', android: '2026-10-28' };
@@ -20,32 +20,32 @@ export const lastDays = (n, now = new Date()) => {
   return Array.from({ length: n }, (_, i) => dayKey(base - (n - 1 - i) * DAY_MS));
 };
 
-const earliestLaunch = (launch) => Object.values(launch).sort()[0];
+export const earliestLaunch = (launch) => Object.values(launch).sort()[0];
 
 // Anzahl Tage vom Datum (inklusive) bis heute (inklusive).
 const daysSince = (iso, now) => Math.floor((utcMidnight(now) - Date.parse(`${iso}T00:00:00Z`)) / DAY_MS) + 1;
 
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
-const sumKeys = (byDate, keys) => keys.reduce((s, k) => s + num(byDate?.[k]), 0);
+export const sumKeys = (byDate, keys) => keys.reduce((s, k) => s + num(byDate?.[k]), 0);
 
 const sumAll = (obj) => Object.values(obj || {}).reduce((s, v) => s + num(v), 0);
 
 const cleanCounts = (obj) => Object.fromEntries(Object.entries(obj || {}).map(([k, v]) => [k, num(v)]));
 
 // Zähler eines Tages über alle Plattformen, nur Plattformen, die an diesem Tag schon gestartet waren.
-const launchedOnDate = (byPlatformDate, date, launch) =>
+export const launchedOnDate = (byPlatformDate, date, launch) =>
   PLATFORMS.reduce((s, p) => (date >= launch[p] ? s + num(byPlatformDate?.[p]?.[date]) : s), 0);
 
 // {platform: {datum: count}} → {platform: Summe im Zeitraum} (nur Tage ab Start der Plattform).
-const platformSums = (byPlatformDate, keys, launch) =>
+export const platformSums = (byPlatformDate, keys, launch) =>
   Object.fromEntries(PLATFORMS.map((p) => [p, sumKeys(byPlatformDate?.[p], keys.filter((k) => k >= launch[p]))]));
 
 // Summe über alle Tage seit Start je Plattform (ohne Zeitraumgrenze).
 const sinceLaunchTotal = (byPlatformDate, launch) =>
   PLATFORMS.reduce((s, p) => s + Object.entries(byPlatformDate?.[p] || {}).reduce((t, [d, v]) => (d >= launch[p] ? t + num(v) : t), 0), 0);
 
-const pct = (part, whole) => (whole > 0 ? Math.min(100, Math.round((part / whole) * 100)) : 0);
+export const pct = (part, whole) => (whole > 0 ? Math.min(100, Math.round((part / whole) * 100)) : 0);
 
 // Kennzahlen zu Spielstarts, Abschlüssen, Modi, Plattformen und Spielort.
 // analytics = Inhalt des RTDB-Knotens "analytics" (Objekt oder null).
