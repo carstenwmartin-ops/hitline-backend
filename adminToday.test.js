@@ -58,12 +58,12 @@ test('Käufe: gleiche Regeln wie die Premium-Seite, nur heute bis jetzt', () => 
   const mk = (extra) => ({ kind: 'coins', amount: 299, currency: 'eur', provider: 'stripe', ...extra });
   const users = {
     u1: { purchases: {
-      p1: mk({ createdAt: berlin('2026-10-28', 9, 0) }),
+      p1: mk({ id: 'cs_live_p1', createdAt: berlin('2026-10-28', 9, 0) }),
       p2: mk({ createdAt: berlin('2026-10-28', 9, 5), environment: 'SANDBOX' }),
-      p3: mk({ createdAt: berlin('2026-10-28', 9, 10), withdrawnAt: 1 }),
+      p3: mk({ id: 'cs_live_p3', createdAt: berlin('2026-10-28', 9, 10), withdrawnAt: 1 }),
       p4: mk({ createdAt: berlin('2026-10-28', 10, 0), provider: 'revenuecat', store: 'APP_STORE', amount: 499 }),
-      p5: mk({ createdAt: berlin('2026-10-27', 9, 0) }), // gestern bis jetzt
-      p6: mk({ createdAt: berlin('2026-10-27', 22, 0) }), // gestern später
+      p5: mk({ id: 'cs_live_p5', createdAt: berlin('2026-10-27', 9, 0) }), // gestern bis jetzt
+      p6: mk({ id: 'cs_live_p6', createdAt: berlin('2026-10-27', 22, 0) }), // gestern später
     } },
   };
   const s = buildTodayStats({ now: NOW, launch: LAUNCH, users });
@@ -112,4 +112,10 @@ test('Ausgabe enthält keine Konto-IDs, Namen oder E-Mail-Adressen', () => {
   const dailyResults = { '2026-10-28': { uid123: { name: 'Mia', score: 10, at: berlin('2026-10-28', 9, 0) } } };
   const json = JSON.stringify(buildTodayStats({ now: NOW, launch: LAUNCH, users, dailyResults }));
   for (const secret of ['uid123', 'GPA1', 'x@example.com', 'Mia']) assert.ok(!json.includes(secret), secret);
+});
+
+test('Heute: Stripe-Käufe im Testmodus (cs_test_) zählen nicht', () => {
+  const mk = (id) => ({ id, kind: 'coins', amount: 299, currency: 'eur', provider: 'stripe', createdAt: berlin('2026-10-28', 9, 0) });
+  const users = { u: { purchases: { a: mk('cs_test_1'), b: mk('cs_live_2') } } };
+  assert.equal(buildTodayStats({ now: NOW, launch: LAUNCH, users }).purchases.count, 1);
 });

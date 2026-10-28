@@ -20,11 +20,18 @@ export const channelOf = (provider, store) => {
 const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
 
 // Zählt ein Kauf als echter Umsatz? Gemeinsame Regel für die Premium-Seite und die Sicht "Heute".
-// Rückgabe: { channel } oder { excluded: 'sandbox' | 'unknownChannel' | 'beforeLaunch' | 'withdrawn' | 'refunded' }
+// Stripe-Zahlung im Live-Modus? Die Kaufnummer ist die Checkout-Sitzung: "cs_live_…" (echt) oder "cs_test_…" (Testmodus).
+export const isLiveStripePurchase = (p) => p.provider === 'stripe' && /^cs_live_/.test(String(p.id || ''));
+
+// Zählt ein Kauf als echter Umsatz? Gemeinsame Regel für die Premium-Seite und die Sicht "Heute".
+// Rückgabe: { channel } oder { excluded: 'sandbox' | 'markedTest' | 'unknownChannel' | 'stripeTest' | 'beforeLaunch' | 'withdrawn' | 'refunded' }
+// Einzelne Käufe lassen sich im Kaufeintrag mit isTest: true als Test markieren (Firebase-Konsole, users/{uid}/purchases/{id}).
 export const classifyPurchase = (p, launch = LAUNCH_DATES) => {
   if (p.environment === 'SANDBOX') return { excluded: 'sandbox' };
+  if (p.isTest === true) return { excluded: 'markedTest' };
   const channel = channelOf(p.provider, p.store);
   if (!channel) return { excluded: 'unknownChannel' };
+  if (p.provider === 'stripe' && !isLiveStripePurchase(p)) return { excluded: 'stripeTest' };
   if (num(p.createdAt) < Date.parse(`${launch[channel]}T00:00:00Z`)) return { excluded: 'beforeLaunch' };
   if (p.withdrawnAt) return { excluded: 'withdrawn' };
   if (p.refundedAt) return { excluded: 'refunded' };
@@ -57,8 +64,8 @@ export const buildPremiumStats = (users, {
   const keySet = new Set(keys);
 
   const accounts = Object.values(users || {}).filter((u) => u && typeof u === 'object');
-  const subs = { active: 0, expiring: 0, billingIssue: 0, canceled: 0, complimentary: 0, byChannel: emptyByChannel(), byPlan: { monthly: 0, yearly: 0, unknown: 0 }, sandboxIgnored: 0 };
-  const excluded = { sandbox: 0, beforeLaunch: 0, withdrawn: 0, refunded: 0, unknownChannel: 0 };
+  const subs = { active: 0, expiring: 0, billingIssue: 0, canceled: 0, complimentary: 0, byChannel: emptyByChannel(), byPlan: { monthly: 0, yearly: 0, unknown: 0 }, sandboxIgnored: 0, stripeTestIgnored: 0 };
+  const excluded = { sandbox: 0, markedTest: 0, stripeTest: 0, beforeLaunch: 0, withdrawn: 0, refunded: 0, unknownChannel: 0 };
   const purchases = {
     count: 0, buyers: new Set(),
     byKind: { coins: 0, premium: 0 },
@@ -76,7 +83,10 @@ export const buildPremiumStats = (users, {
     const sub = profile.premiumSubscription;
     if (profile.appleMusicComplimentary) subs.complimentary += 1;
     if (sub && typeof sub === 'object') {
+      // Ein Stripe-Abo zählt nur, wenn das Konto einen Abo-Kauf im Live-Modus hat (Kaufnummer cs_live_…); Testabos haben cs_test_ oder gar keinen Eintrag.
+      const liveStripeSub = Object.values(acc.purchases || {}).some((p) => p && p.kind === 'premium' && isLiveStripePurchase(p));
       if (sub.environment === 'SANDBOX') subs.sandboxIgnored += 1;
+      else if (sub.provider === 'stripe' && !liveStripeSub) subs.stripeTestIgnored += 1;
       else {
         const channel = channelOf(sub.provider, sub.store);
         const live = sub.status === 'active' && (!sub.currentPeriodEnd || sub.currentPeriodEnd > nowMs);
