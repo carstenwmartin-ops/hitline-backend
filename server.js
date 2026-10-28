@@ -21,6 +21,10 @@ import { handleStripeRefund } from './stripeRefund.js';
 import { classifyAccount, DEFAULT_CUTOFF_MS } from './testAccountCleanup.js';
 import { signTicket, verifyTicket, summarizeGuest, transferGuestNotes } from './guestTransfer.js';
 import { buildGameStats } from './adminStats.js';
+import { buildDailyStats, lastBerlinDays, daysForRange, FUNNEL_EVENTS } from './adminDaily.js';
+import { pickDailySongs } from './dailyHits.js';
+import { buildPremiumStats } from './adminPremium.js';
+import { buildUserStats } from './adminUsers.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -1248,6 +1252,91 @@ app.get('/api/admin/stats/games', async (req, res) => {
   }
 });
 
+// GET /api/admin/stats/daily?days=start|7|30 — Admin-only: Auswertung der Daily Competition (Teilnahme, Punkte, Songs, Ligen, Trichter).
+// Ausgabe enthält nur Zähler und Durchschnitte, keine Namen und keine Konto-IDs. Gleicher Zwischenspeicher wie bei den Spielstatistiken.
+const adminDailyCache = new Map();
+app.get('/api/admin/stats/daily', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const days = [7, 30].includes(Number(req.query.days)) ? Number(req.query.days) : 'start';
+    const hit = adminDailyCache.get(days);
+    if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') return res.json({ ...hit.data, cached: true });
+    // Nur die Tage lesen, die der Zeitraum braucht
+    const keys = lastBerlinDays(daysForRange(days));
+    const [dayResults, eventSnaps, leaguesSnap] = await Promise.all([
+      Promise.all(keys.map((k) => adminDb.ref(`dailyResults/${k}`).once('value'))),
+      Promise.all(FUNNEL_EVENTS.map((ev) => adminDb.ref(`analytics/${ev}`).once('value'))),
+      adminDb.ref('dailyLeagues').once('value'),
+    ]);
+    const results = Object.fromEntries(keys.map((k, i) => [k, dayResults[i].val() || {}]));
+    const analytics = Object.fromEntries(FUNNEL_EVENTS.map((ev, i) => [ev, eventSnaps[i].val() || {}]));
+    const data = { generatedAt: new Date().toISOString(), ...buildDailyStats({ results, analytics, leagues: leaguesSnap.val(), songsForDate: (d) => pickDailySongs(d), days }) };
+    adminDailyCache.set(days, { at: Date.now(), data });
+    res.json({ ...data, cached: false });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// GET /api/admin/stats/premium?days=start|7|30|90 — Admin-only: Premium-Abos, Käufe und Umsatz (brutto).
+// Liest users/* einmal (nur Abo und Käufe werden ausgewertet) und gibt ausschließlich Zähler und Summen zurück:
+// keine Konto-IDs, Namen oder E-Mail-Adressen. Sandbox-Käufe, Käufe vor dem Plattformstart, widerrufene und erstattete Käufe zählen nicht.
+const adminPremiumCache = new Map();
+app.get('/api/admin/stats/premium', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 'start';
+    const hit = adminPremiumCache.get(days);
+    if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') return res.json({ ...hit.data, cached: true });
+    const snap = await adminDb.ref('users').once('value');
+    const slim = {};
+    for (const [uid, node] of Object.entries(snap.val() || {})) {
+      slim[uid] = { profile: { premiumSubscription: node?.profile?.premiumSubscription, appleMusicComplimentary: node?.profile?.appleMusicComplimentary }, purchases: node?.purchases };
+    }
+    const data = {
+      generatedAt: new Date().toISOString(),
+      ...buildPremiumStats(slim, { days, isYearlyProduct: isYearlyPremium, stripeYearlyPriceId: process.env.STRIPE_PRICE_YEARLY }),
+    };
+    adminPremiumCache.set(days, { at: Date.now(), data });
+    res.json({ ...data, cached: false });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// GET /api/admin/stats/users?days=start|7|30|90 — Admin-only: Konten aus Firebase Auth (Anzahl, Neuanmeldungen, Anmeldewege, zuletzt aktive).
+// Liefert nur Zähler, keine E-Mail-Adressen oder Namen. Gäste ohne Konto kommen hier nicht vor.
+const adminUsersCache = new Map();
+app.get('/api/admin/stats/users', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 'start';
+    const hit = adminUsersCache.get(days);
+    if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') return res.json({ ...hit.data, cached: true });
+    const { default: admin } = await import('firebase-admin');
+    const list = [];
+    let pageToken;
+    do {
+      const page = await admin.auth().listUsers(1000, pageToken);
+      for (const u of page.users) {
+        list.push({
+          createdAt: Date.parse(u.metadata.creationTime) || 0,
+          lastSignInAt: Date.parse(u.metadata.lastSignInTime) || 0,
+          providers: u.providerData.map((p) => p.providerId),
+        });
+      }
+      pageToken = page.pageToken;
+    } while (pageToken && list.length < 50000);
+    const data = { generatedAt: new Date().toISOString(), ...buildUserStats(list, { days }) };
+    adminUsersCache.set(days, { at: Date.now(), data });
+    res.json({ ...data, cached: false });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // GET /api/admin/testflight-users — Admin-only: listet alle Nutzer mit gesetztem
 // profile.testChannel (siehe IOS-TESTFLIGHT-BETA.md) samt E-Mail. Grundlage für ein gezieltes
 // Aufräumen (POST /api/account/delete je uid) nach Ende einer TestFlight-Beta.
@@ -2416,6 +2505,9 @@ app.listen(PORT, () => {
   console.log('   POST /api/hitline-playlist-tracks');
   console.log('   GET  /api/config');
   console.log('   GET  /api/admin/stats/games');
+  console.log('   GET  /api/admin/stats/daily');
+  console.log('   GET  /api/admin/stats/premium');
+  console.log('   GET  /api/admin/stats/users');
   console.log('   GET  /api/lastfm-similar');
   console.log('   GET  /health');
 });
