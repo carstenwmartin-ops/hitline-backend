@@ -1224,7 +1224,7 @@ const requireAdmin = async (req) => {
   return decoded;
 };
 
-// GET /api/admin/stats/games?days=7|30|90 — Admin-only: Spielnutzung für das Admin-Dashboard (admin.hitlines.de).
+// GET /api/admin/stats/games?days=start|7|30|90 — Admin-only: Spielnutzung für das Admin-Dashboard (admin.hitlines.de).
 // Liest nur den Knoten "analytics" (Zähler ohne Personenbezug) und wertet ihn in adminStats.js aus.
 // Kurzer Zwischenspeicher je Zeitraum, damit wiederholte Abrufe Firebase nicht belasten.
 const adminStatsCache = new Map();
@@ -1233,7 +1233,8 @@ app.get('/api/admin/stats/games', async (req, res) => {
   try {
     await requireAdmin(req);
     if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
-    const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 30;
+    // 'start' = seit dem Start der Plattformen (Standard), sonst die letzten 7/30/90 Tage; Tage vor dem Start zählen nie (siehe LAUNCH_DATES)
+    const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 'start';
     const hit = adminStatsCache.get(days);
     if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') {
       return res.json({ ...hit.data, cached: true });
