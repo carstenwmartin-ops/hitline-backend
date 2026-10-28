@@ -25,6 +25,8 @@ import { buildDailyStats, lastBerlinDays, daysForRange, FUNNEL_EVENTS } from './
 import { pickDailySongs } from './dailyHits.js';
 import { buildPremiumStats } from './adminPremium.js';
 import { buildUserStats } from './adminUsers.js';
+import { buildTodayStats } from './adminToday.js';
+import { addDays, berlinDateKey } from './dailyCore.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -1306,6 +1308,25 @@ app.get('/api/admin/stats/premium', async (req, res) => {
   }
 });
 
+// Konten aus Firebase Auth als schlanke Liste (Zeitpunkte in ms, Anmeldeanbieter) — ohne E-Mail-Adressen und Namen.
+const listAuthAccounts = async () => {
+  const { default: admin } = await import('firebase-admin');
+  const list = [];
+  let pageToken;
+  do {
+    const page = await admin.auth().listUsers(1000, pageToken);
+    for (const u of page.users) {
+      list.push({
+        createdAt: Date.parse(u.metadata.creationTime) || 0,
+        lastSignInAt: Date.parse(u.metadata.lastSignInTime) || 0,
+        providers: u.providerData.map((p) => p.providerId),
+      });
+    }
+    pageToken = page.pageToken;
+  } while (pageToken && list.length < 50000);
+  return list;
+};
+
 // GET /api/admin/stats/users?days=start|7|30|90 — Admin-only: Konten aus Firebase Auth (Anzahl, Neuanmeldungen, Anmeldewege, zuletzt aktive).
 // Liefert nur Zähler, keine E-Mail-Adressen oder Namen. Gäste ohne Konto kommen hier nicht vor.
 const adminUsersCache = new Map();
@@ -1315,22 +1336,48 @@ app.get('/api/admin/stats/users', async (req, res) => {
     const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 'start';
     const hit = adminUsersCache.get(days);
     if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') return res.json({ ...hit.data, cached: true });
-    const { default: admin } = await import('firebase-admin');
-    const list = [];
-    let pageToken;
-    do {
-      const page = await admin.auth().listUsers(1000, pageToken);
-      for (const u of page.users) {
-        list.push({
-          createdAt: Date.parse(u.metadata.creationTime) || 0,
-          lastSignInAt: Date.parse(u.metadata.lastSignInTime) || 0,
-          providers: u.providerData.map((p) => p.providerId),
-        });
-      }
-      pageToken = page.pageToken;
-    } while (pageToken && list.length < 50000);
+    const list = await listAuthAccounts();
     const data = { generatedAt: new Date().toISOString(), ...buildUserStats(list, { days }) };
     adminUsersCache.set(days, { at: Date.now(), data });
+    res.json({ ...data, cached: false });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// GET /api/admin/stats/today — Admin-only: Sicht "Heute" (Berliner Tag von 0:00 Uhr bis jetzt) mit Stundenwerten und Vergleich
+// zu "gestern bis zur gleichen Uhrzeit". Nur Zähler und Summen. Kurzer Zwischenspeicher (60 s), damit die Seite regelmäßig
+// nachladen kann, ohne Firebase zu belasten.
+let adminTodayCache = null;
+const ADMIN_TODAY_TTL_MS = 60 * 1000;
+app.get('/api/admin/stats/today', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    if (adminTodayCache && Date.now() - adminTodayCache.at < ADMIN_TODAY_TTL_MS && req.query.fresh !== '1') {
+      return res.json({ ...adminTodayCache.data, cached: true });
+    }
+    const today = berlinDateKey();
+    const yesterday = addDays(today, -1);
+    const [startedSnap, completedSnap, todaySnap, yesterdaySnap, usersSnap, accounts] = await Promise.all([
+      adminDb.ref('analytics/game_started').once('value'),
+      adminDb.ref('analytics/game_completed').once('value'),
+      adminDb.ref(`dailyResults/${today}`).once('value'),
+      adminDb.ref(`dailyResults/${yesterday}`).once('value'),
+      adminDb.ref('users').once('value'),
+      listAuthAccounts(),
+    ]);
+    const slim = {};
+    for (const [uid, node] of Object.entries(usersSnap.val() || {})) slim[uid] = { purchases: node?.purchases };
+    const data = {
+      generatedAt: new Date().toISOString(),
+      ...buildTodayStats({
+        analytics: { game_started: startedSnap.val() || {}, game_completed: completedSnap.val() || {} },
+        dailyResults: { [today]: todaySnap.val() || {}, [yesterday]: yesterdaySnap.val() || {} },
+        users: slim, authUsers: accounts,
+      }),
+    };
+    adminTodayCache = { at: Date.now(), data };
     res.json({ ...data, cached: false });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
@@ -2508,6 +2555,7 @@ app.listen(PORT, () => {
   console.log('   GET  /api/admin/stats/daily');
   console.log('   GET  /api/admin/stats/premium');
   console.log('   GET  /api/admin/stats/users');
+  console.log('   GET  /api/admin/stats/today');
   console.log('   GET  /api/lastfm-similar');
   console.log('   GET  /health');
 });
