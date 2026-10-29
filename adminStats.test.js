@@ -120,3 +120,30 @@ test('Gesamtwert fällt ohne "total" auf die Summe der Tage zurück', () => {
   const s = buildGameStats({ game_started: { by_date: { '2026-10-28': 3, '2026-10-27': 4 } } }, { days: 1, now: NOW });
   assert.equal(s.includesTests.started, 7);
 });
+
+test('Rundenlänge und Abbruchstelle: leere Daten ergeben Nullen in fester Reihenfolge', () => {
+  const s = buildGameStats({}, { days: 7, now: NOW, launch: LAUNCH });
+  assert.deepEqual(Object.keys(s.roundLength), ['short', 'long', 'fixed']);
+  assert.equal(s.roundLength.short.completionPct, 0);
+  assert.deepEqual(s.leftAt.buckets.map((b) => b.bucket), ['1-2', '3-4', '5-6', '7-9', '10plus', 'multi']);
+  assert.equal(s.leftAt.total, 0);
+});
+
+test('Rundenlänge: Abschlussquote je Länge, Abbruchstellen in Klassen', () => {
+  const analytics = {
+    game_started: { by_round_length: { short: 10, long: 20 } },
+    game_completed: { by_round_length: { short: 7, long: 8 } },
+    game_left: {
+      by_platform_date: { web: { '2026-10-28': 6, '2026-10-10': 99 } },
+      by_rounds_bucket: { '3-4': 4, '7-9': 2 },
+      by_round_length: { short: 2, long: 4 },
+      by_mode: { classic: 5, race: 1 },
+    },
+  };
+  const s = buildGameStats(analytics, { days: 7, now: NOW, launch: LAUNCH });
+  assert.deepEqual(s.roundLength.short, { started: 10, completed: 7, left: 2, completionPct: 70 });
+  assert.deepEqual(s.roundLength.long, { started: 20, completed: 8, left: 4, completionPct: 40 });
+  assert.equal(s.leftAt.total, 6); // 10.10. liegt vor dem Start
+  assert.deepEqual(s.leftAt.buckets.find((b) => b.bucket === '3-4'), { bucket: '3-4', count: 4 });
+  assert.deepEqual(s.leftAt.byMode, { classic: 5, race: 1 });
+});

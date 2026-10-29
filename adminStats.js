@@ -41,6 +41,9 @@ export const launchedOnDate = (byPlatformDate, date, launch) =>
 export const platformSums = (byPlatformDate, keys, launch) =>
   Object.fromEntries(PLATFORMS.map((p) => [p, sumKeys(byPlatformDate?.[p], keys.filter((k) => k >= launch[p]))]));
 
+// Summe über die Tage eines Zeitraums, je Plattform nur ab deren Start.
+const launchedTotal = (byPlatformDate, keys, launch) => keys.reduce((s, k) => s + launchedOnDate(byPlatformDate, k, launch), 0);
+
 // Summe über alle Tage seit Start je Plattform (ohne Zeitraumgrenze).
 const sinceLaunchTotal = (byPlatformDate, launch) =>
   PLATFORMS.reduce((s, p) => s + Object.entries(byPlatformDate?.[p] || {}).reduce((t, [d, v]) => (d >= launch[p] ? t + num(v) : t), 0), 0);
@@ -79,6 +82,16 @@ export const buildGameStats = (analytics, { days = 30, now = new Date(), launch 
     }))
     .sort((x, y) => y.started - x.started);
 
+  // Abbruchstelle: "game_left" (Spiel mitten in der Runde verlassen) mit gespielten Runden in Klassen. Die Zähler gibt es erst ab dem
+  // App-Stand mit dieser Messung; sie enthalten keine älteren Testaufrufe. Reihenfolge der Klassen ist fest.
+  const left = a.game_left || {};
+  const ROUND_BUCKETS = ['1-2', '3-4', '5-6', '7-9', '10plus', 'multi'];
+  const leftBuckets = cleanCounts(left.by_rounds_bucket);
+  const roundLengths = ['short', 'long', 'fixed'];
+  const lengthStarted = cleanCounts(started.by_round_length);
+  const lengthCompleted = cleanCounts(completed.by_round_length);
+  const lengthLeft = cleanCounts(left.by_round_length);
+
   const keysFromFirstLaunch = keys.filter((k) => k >= firstLaunch);
   const keysFromWebLaunch = keys.filter((k) => k >= launch.web);
   // "Neue Nutzer" liegen ohne Plattform vor: Zählung ab dem frühesten Start (Android-Tests vor dem 28.10. sind darin nicht trennbar).
@@ -107,6 +120,16 @@ export const buildGameStats = (analytics, { days = 30, now = new Date(), launch 
     sinceLaunch: {
       started: sinceLaunchTotal(started.by_platform_date, launch),
       completed: sinceLaunchTotal(completed.by_platform_date, launch),
+    },
+    // Messung seit dem App-Stand mit Rundenlänge und Abbruchstelle (ohne ältere Testaufrufe). Spielstarts, Abschlüsse und Verlassen je Länge.
+    roundLength: Object.fromEntries(roundLengths.map((l) => [l, {
+      started: lengthStarted[l] || 0, completed: lengthCompleted[l] || 0, left: lengthLeft[l] || 0,
+      completionPct: pct(lengthCompleted[l] || 0, lengthStarted[l] || 0),
+    }])),
+    leftAt: {
+      total: launchedTotal(left.by_platform_date, keys, launch),
+      buckets: ROUND_BUCKETS.map((b) => ({ bucket: b, count: leftBuckets[b] || 0 })),
+      byMode: cleanCounts(left.by_mode),
     },
     // Ohne Datumsdimension geschrieben: enthalten auch die Testaufrufe vor dem Start und lassen sich nicht abgrenzen.
     includesTests: {
