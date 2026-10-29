@@ -1,3 +1,5 @@
+import { sanitizeName } from './contentFilter.js';
+
 // dailyCore.js — reine Logik der "Daily Competition": Datumsschlüssel (Europe/Berlin), Wertung,
 // Wochen-/Monatssummen, Plätze und Noten-Belohnung. Ohne Firebase/Express, damit testbar.
 
@@ -135,6 +137,7 @@ export const nextStreak = (streak, todayKey) => {
 };
 
 export const cleanDisplayName = (raw, fallback = 'Spieler') => {
-  const name = String(raw ?? '').replace(/[^\p{L}\p{N} ._-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 20);
+  // Wortfilter zuerst: bekannte Begriffe werden zu Sternchen und fallen beim Entfernen unerlaubter Zeichen weg (Apple Guideline 1.2)
+  const name = sanitizeName(String(raw ?? '')).replace(/[^\p{L}\p{N} ._-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 20);
   return name || fallback;
 };

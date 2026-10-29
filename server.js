@@ -27,6 +27,7 @@ import { buildPremiumStats } from './adminPremium.js';
 import { buildUserStats } from './adminUsers.js';
 import { buildTodayStats } from './adminToday.js';
 import { addDays, berlinDateKey } from './dailyCore.js';
+import { moderationPath, matchByName } from './dailyModeration.js';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -1476,7 +1477,9 @@ app.post('/api/admin/mark-all-existing-as-testers', async (req, res) => {
 // POST /api/admin/moderate — Admin-only: Moderation nach einer Meldung (Apple Guideline 1.2).
 // Aktionen: remove-stage (Eintrag in der öffentlichen Suche und den Raum löschen), disable-host
 // (Konto des Stage-Hosts sperren, aufgelöst über roomHosts/{code}, plus Stage löschen),
-// disable-user / enable-user (Konto per E-Mail sperren bzw. entsperren), reset-name (Anzeigename zurücksetzen).
+// disable-user / enable-user (Konto per E-Mail sperren bzw. entsperren), reset-name (Anzeigename zurücksetzen),
+// find-daily-user (zu einem gemeldeten Namen aus der Daily das Konto finden: name + key = Tag, Woche, Monat oder Liga-Code),
+// remove-daily-user (Konto per E-Mail aus Tagesergebnissen, Ranglisten und Ligen der Daily entfernen).
 app.post('/api/admin/moderate', async (req, res) => {
   try {
     await requireAdmin(req);
@@ -1526,6 +1529,27 @@ app.post('/api/admin/moderate', async (req, res) => {
       const user = await admin.auth().getUserByEmail(email);
       await admin.auth().updateUser(user.uid, { displayName: 'Spieler' });
       await adminDb.ref(`users/${user.uid}/profile/displayName`).set('Spieler').catch(() => {});
+      return res.json({ success: true, uid: user.uid });
+    }
+    if (action === 'find-daily-user') {
+      const target = moderationPath(req.body?.key);
+      const name = String(req.body?.name || '').trim();
+      if (!target || !name) return res.status(400).json({ error: 'Name und gültiger Schlüssel (Tag, Woche, Monat oder Liga-Code) erforderlich' });
+      const entries = (await adminDb.ref(target.path).once('value')).val() || {};
+      const users = [];
+      for (const m of matchByName(entries, name)) {
+        let mail = null;
+        try { mail = (await admin.auth().getUser(m.uid)).email || null; } catch { /* Konto existiert nicht mehr */ }
+        users.push({ uid: m.uid, name: m.name, email: mail });
+      }
+      return res.json({ success: true, kind: target.kind, users });
+    }
+    if (action === 'remove-daily-user') {
+      if (!email) return res.status(400).json({ error: 'E-Mail erforderlich' });
+      assertNotAdmin(email);
+      const user = await admin.auth().getUserByEmail(email);
+      await removeDailyData(adminDb, user.uid);
+      console.log(`🛡️ Moderation: Daily-Daten von Konto ${user.uid} entfernt`);
       return res.json({ success: true, uid: user.uid });
     }
     return res.status(400).json({ error: 'Unbekannte Aktion' });
