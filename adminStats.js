@@ -91,6 +91,8 @@ export const buildGameStats = (analytics, { days = 30, now = new Date(), launch 
   const lengthStarted = cleanCounts(started.by_round_length);
   const lengthCompleted = cleanCounts(completed.by_round_length);
   const lengthLeft = cleanCounts(left.by_round_length);
+  // "Runde erreicht": Solo-Spiele, die Runde 3/5/7/10 erreicht haben (zählt auch, wer die App einfach schließt). Ohne Datumsdimension.
+  const reachedCounts = cleanCounts(a.game_round_reached?.by_milestone);
 
   const keysFromFirstLaunch = keys.filter((k) => k >= firstLaunch);
   const keysFromWebLaunch = keys.filter((k) => k >= launch.web);
@@ -126,6 +128,7 @@ export const buildGameStats = (analytics, { days = 30, now = new Date(), launch 
       started: lengthStarted[l] || 0, completed: lengthCompleted[l] || 0, left: lengthLeft[l] || 0,
       completionPct: pct(lengthCompleted[l] || 0, lengthStarted[l] || 0),
     }])),
+    roundsReached: [3, 5, 7, 10].map((m) => ({ round: m, count: reachedCounts[String(m)] || 0 })),
     leftAt: {
       total: launchedTotal(left.by_platform_date, keys, launch),
       buckets: ROUND_BUCKETS.map((b) => ({ bucket: b, count: leftBuckets[b] || 0 })),

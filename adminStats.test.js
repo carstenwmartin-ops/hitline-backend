@@ -147,3 +147,8 @@ test('Rundenlänge: Abschlussquote je Länge, Abbruchstellen in Klassen', () => 
   assert.deepEqual(s.leftAt.buckets.find((b) => b.bucket === '3-4'), { bucket: '3-4', count: 4 });
   assert.deepEqual(s.leftAt.byMode, { classic: 5, race: 1 });
 });
+
+test('Runde erreicht: Meilensteine 3/5/7/10 aus game_round_reached', () => {
+  const s = buildGameStats({ game_round_reached: { by_milestone: { '3': 9, '5': 6, '10': 2 } } }, { days: 7, now: NOW, launch: LAUNCH });
+  assert.deepEqual(s.roundsReached, [{ round: 3, count: 9 }, { round: 5, count: 6 }, { round: 7, count: 0 }, { round: 10, count: 2 }]);
+});
