@@ -1231,6 +1231,61 @@ const requireAdmin = async (req) => {
   return decoded;
 };
 
+// GET /api/admin/stats/coins — Admin-only: Noten-Übersicht (Summe, Durchschnitt, Verteilung, Top 10 mit E-Mail).
+// Liest users/*/profile/{coins,totalEarned} einmal komplett; kurzer Zwischenspeicher, damit wiederholtes Öffnen nichts kostet.
+let adminCoinsCache = null;
+app.get('/api/admin/stats/coins', async (req, res) => {
+  try {
+    await requireAdmin(req);
+    if (adminCoinsCache && Date.now() - adminCoinsCache.at < 60000 && req.query.fresh !== '1') return res.json({ ...adminCoinsCache.data, cached: true });
+    if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
+    const { default: admin } = await import('firebase-admin');
+    const snap = await adminDb.ref('users').once('value');
+    const all = snap.val() || {};
+    const accounts = [];
+    for (const uid of Object.keys(all)) {
+      const p = all[uid]?.profile;
+      if (!p || typeof p.coins !== 'number') continue;
+      accounts.push({ uid, coins: p.coins, totalEarned: typeof p.totalEarned === 'number' ? p.totalEarned : 0 });
+    }
+    const total = accounts.reduce((s, a) => s + a.coins, 0);
+    const buckets = [
+      { label: '0–5', min: 0, max: 5, count: 0 },
+      { label: '6–20', min: 6, max: 20, count: 0 },
+      { label: '21–50', min: 21, max: 50, count: 0 },
+      { label: '51–100', min: 51, max: 100, count: 0 },
+      { label: 'über 100', min: 101, max: Infinity, count: 0 },
+    ];
+    for (const a of accounts) {
+      const b = buckets.find(x => a.coins >= x.min && a.coins <= x.max);
+      if (b) b.count += 1;
+    }
+    const sorted = [...accounts].sort((a, b) => b.coins - a.coins);
+    const sortedCoins = sorted.map(a => a.coins).reverse();
+    const median = sortedCoins.length ? sortedCoins[Math.floor(sortedCoins.length / 2)] : 0;
+    const top = [];
+    for (const a of sorted.slice(0, 10)) {
+      let email = '(unbekannt)';
+      try { email = (await admin.auth().getUser(a.uid)).email || '(keine E-Mail)'; } catch {}
+      top.push({ email, coins: a.coins, totalEarned: a.totalEarned });
+    }
+    const data = {
+      generatedAt: new Date().toISOString(),
+      accounts: accounts.length,
+      totalCoins: total,
+      average: accounts.length ? Math.round((total / accounts.length) * 10) / 10 : 0,
+      median,
+      withZero: accounts.filter(a => a.coins === 0).length,
+      distribution: buckets.map(b => ({ label: b.label, count: b.count })),
+      top,
+    };
+    adminCoinsCache = { at: Date.now(), data };
+    res.json({ ...data, cached: false });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
 // GET /api/admin/stats/games?days=start|7|30|90 — Admin-only: Spielnutzung für das Admin-Dashboard (admin.hitlines.de).
 // Liest nur den Knoten "analytics" (Zähler ohne Personenbezug) und wertet ihn in adminStats.js aus.
 // Kurzer Zwischenspeicher je Zeitraum, damit wiederholte Abrufe Firebase nicht belasten.
