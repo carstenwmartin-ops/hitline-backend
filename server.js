@@ -1099,6 +1099,35 @@ const getUsersSnapshot = async ({ fresh = false } = {}) => {
   return usersSnapshotLoading;
 };
 
+// Gemeinsamer Zwischenspeicher für Ereignis-Zähler unter analytics/{ereignis} (nur Admin-Auswertungen).
+// Spielstatistik, Daily-Statistik und "Heute" lesen teils dieselben Ereignisse; jedes wird höchstens einmal
+// je ANALYTICS_TTL_MS geladen und dann geteilt. Die Spielstatistik liest nur die Ereignisse, die sie
+// auswertet (ANALYTICS_GAME_EVENTS), statt den ganzen Knoten "analytics" mit allen übrigen Ereignissen.
+// `fresh` wirkt wie bei getUsersSnapshot erst ab ANALYTICS_MIN_AGE_MS. Rückgabe nicht verändern.
+const ANALYTICS_TTL_MS = 5 * 60 * 1000;
+const ANALYTICS_MIN_AGE_MS = 60 * 1000;
+const ANALYTICS_GAME_EVENTS = ['game_started', 'game_completed', 'game_left', 'game_round_reached', 'tutorial_completed', 'game_config_chosen'];
+const analyticsEventCache = new Map(); // name -> { at, data } | { loading: Promise }
+const getAnalyticsEvent = (name, { fresh = false } = {}) => {
+  const entry = analyticsEventCache.get(name);
+  if (entry?.loading) return entry.loading;
+  if (entry) {
+    const age = Date.now() - entry.at;
+    if (age < ANALYTICS_TTL_MS && !(fresh && age >= ANALYTICS_MIN_AGE_MS)) return Promise.resolve(entry.data);
+  }
+  const loading = adminDb.ref(`analytics/${name}`).once('value').then((snap) => {
+    const data = snap.val();
+    analyticsEventCache.set(name, { at: Date.now(), data });
+    return data;
+  }).catch((e) => {
+    if (entry) analyticsEventCache.set(name, entry); else analyticsEventCache.delete(name);
+    throw e;
+  });
+  analyticsEventCache.set(name, { ...(entry || { at: 0, data: null }), loading });
+  return loading;
+};
+const getAnalyticsEvents = async (names, opts) => Object.fromEntries(await Promise.all(names.map(async (n) => [n, await getAnalyticsEvent(n, opts)])));
+
 // GET /api/admin/complimentary-list — wer hat aktuell appleMusicComplimentary=true (Admin-only).
 // users/{uid} ist laut database.rules.json strikt Owner-only (kein Admin-Ausnahmefall in den
 // Rules) — im Firebase-Console-Datenbaum liesse sich das nur muehsam Knoten fuer Knoten pruefen,
@@ -1324,8 +1353,8 @@ app.get('/api/admin/stats/games', async (req, res) => {
     if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') {
       return res.json({ ...hit.data, cached: true });
     }
-    const snap = await adminDb.ref('analytics').once('value');
-    const data = { generatedAt: new Date().toISOString(), ...buildGameStats(snap.val(), { days }) };
+    const analytics = await getAnalyticsEvents(ANALYTICS_GAME_EVENTS, { fresh: req.query.fresh === '1' });
+    const data = { generatedAt: new Date().toISOString(), ...buildGameStats(analytics, { days }) };
     adminStatsCache.set(days, { at: Date.now(), data });
     res.json({ ...data, cached: false });
   } catch (e) {
@@ -1345,13 +1374,13 @@ app.get('/api/admin/stats/daily', async (req, res) => {
     if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') return res.json({ ...hit.data, cached: true });
     // Nur die Tage lesen, die der Zeitraum braucht
     const keys = lastBerlinDays(daysForRange(days));
-    const [dayResults, eventSnaps, leaguesSnap] = await Promise.all([
+    const [dayResults, analyticsRaw, leaguesSnap] = await Promise.all([
       Promise.all(keys.map((k) => adminDb.ref(`dailyResults/${k}`).once('value'))),
-      Promise.all(FUNNEL_EVENTS.map((ev) => adminDb.ref(`analytics/${ev}`).once('value'))),
+      getAnalyticsEvents(FUNNEL_EVENTS, { fresh: req.query.fresh === '1' }),
       adminDb.ref('dailyLeagues').once('value'),
     ]);
     const results = Object.fromEntries(keys.map((k, i) => [k, dayResults[i].val() || {}]));
-    const analytics = Object.fromEntries(FUNNEL_EVENTS.map((ev, i) => [ev, eventSnaps[i].val() || {}]));
+    const analytics = Object.fromEntries(FUNNEL_EVENTS.map((ev) => [ev, analyticsRaw[ev] || {}]));
     const data = { generatedAt: new Date().toISOString(), ...buildDailyStats({ results, analytics, leagues: leaguesSnap.val(), songsForDate: (d) => pickDailySongs(d), days }) };
     adminDailyCache.set(days, { at: Date.now(), data });
     res.json({ ...data, cached: false });
@@ -1438,9 +1467,10 @@ app.get('/api/admin/stats/today', async (req, res) => {
     }
     const today = berlinDateKey();
     const yesterday = addDays(today, -1);
-    const [startedSnap, completedSnap, todaySnap, yesterdaySnap, usersSnap, accounts] = await Promise.all([ // usersSnap = geteilter Snapshot ({ data })
-      adminDb.ref('analytics/game_started').once('value'),
-      adminDb.ref('analytics/game_completed').once('value'),
+    const fresh = req.query.fresh === '1';
+    const [started, completed, todaySnap, yesterdaySnap, usersSnap, accounts] = await Promise.all([ // usersSnap = geteilter Snapshot ({ data })
+      getAnalyticsEvent('game_started', { fresh }),
+      getAnalyticsEvent('game_completed', { fresh }),
       adminDb.ref(`dailyResults/${today}`).once('value'),
       adminDb.ref(`dailyResults/${yesterday}`).once('value'),
       getUsersSnapshot({ fresh: req.query.fresh === '1' }),
@@ -1451,7 +1481,7 @@ app.get('/api/admin/stats/today', async (req, res) => {
     const data = {
       generatedAt: new Date().toISOString(),
       ...buildTodayStats({
-        analytics: { game_started: startedSnap.val() || {}, game_completed: completedSnap.val() || {} },
+        analytics: { game_started: started || {}, game_completed: completed || {} },
         dailyResults: { [today]: todaySnap.val() || {}, [yesterday]: yesterdaySnap.val() || {} },
         users: slim, authUsers: accounts,
       }),
