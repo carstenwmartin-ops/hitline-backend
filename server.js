@@ -1073,6 +1073,32 @@ app.post('/api/admin/grant-complimentary', async (req, res) => {
   }
 });
 
+// Gemeinsamer Zwischenspeicher für den kompletten users-Knoten (nur für Admin-Auswertungen).
+// Der Knoten ist der größte der Datenbank; jeder Komplett-Lesezugriff zählt voll auf das Download-
+// Kontingent. Alle Admin-Endpoints teilen sich daher EINEN Snapshot, statt ihn je Endpoint und
+// je Zeitraum neu zu laden. Gleichzeitige Abrufe teilen sich zudem einen laufenden Ladevorgang.
+// `fresh` umgeht den Zwischenspeicher nur, wenn er älter als USERS_SNAPSHOT_MIN_AGE_MS ist,
+// damit ein Dashboard, das dauerhaft ?fresh=1 mitschickt, das Limit nicht umgeht.
+// Der Rückgabewert darf nicht verändert werden (wird von allen Aufrufern geteilt).
+const USERS_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
+const USERS_SNAPSHOT_MIN_AGE_MS = 60 * 1000;
+let usersSnapshot = null;
+let usersSnapshotLoading = null;
+const getUsersSnapshot = async ({ fresh = false } = {}) => {
+  if (usersSnapshot) {
+    const age = Date.now() - usersSnapshot.at;
+    if (age < USERS_SNAPSHOT_TTL_MS && !(fresh && age >= USERS_SNAPSHOT_MIN_AGE_MS)) return usersSnapshot;
+  }
+  if (!usersSnapshotLoading) {
+    usersSnapshotLoading = (async () => {
+      const snap = await adminDb.ref('users').once('value');
+      usersSnapshot = { at: Date.now(), data: snap.val() || {} };
+      return usersSnapshot;
+    })().finally(() => { usersSnapshotLoading = null; });
+  }
+  return usersSnapshotLoading;
+};
+
 // GET /api/admin/complimentary-list — wer hat aktuell appleMusicComplimentary=true (Admin-only).
 // users/{uid} ist laut database.rules.json strikt Owner-only (kein Admin-Ausnahmefall in den
 // Rules) — im Firebase-Console-Datenbaum liesse sich das nur muehsam Knoten fuer Knoten pruefen,
@@ -1089,8 +1115,7 @@ app.get('/api/admin/complimentary-list', async (req, res) => {
       return res.status(403).json({ error: 'Nicht berechtigt' });
     }
     if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
-    const snap = await adminDb.ref('users').once('value');
-    const allUsers = snap.val() || {};
+    const allUsers = (await getUsersSnapshot()).data;
     const grantedUids = Object.keys(allUsers).filter(uid => allUsers[uid]?.profile?.appleMusicComplimentary === true);
     const list = await Promise.all(grantedUids.map(async uid => {
       try {
@@ -1193,8 +1218,7 @@ app.get('/api/admin/coins-discrepancy-check', async (req, res) => {
     }
     if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
 
-    const usersSnap = await adminDb.ref('users').once('value');
-    const allUsers = usersSnap.val() || {};
+    const allUsers = (await getUsersSnapshot({ fresh: true })).data;
 
     const STARTING_COINS = 5;
     const results = [];
@@ -1237,11 +1261,10 @@ let adminCoinsCache = null;
 app.get('/api/admin/stats/coins', async (req, res) => {
   try {
     await requireAdmin(req);
-    if (adminCoinsCache && Date.now() - adminCoinsCache.at < 60000 && req.query.fresh !== '1') return res.json({ ...adminCoinsCache.data, cached: true });
+    if (adminCoinsCache && Date.now() - adminCoinsCache.at < 5 * 60 * 1000 && req.query.fresh !== '1') return res.json({ ...adminCoinsCache.data, cached: true });
     if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
     const { default: admin } = await import('firebase-admin');
-    const snap = await adminDb.ref('users').once('value');
-    const all = snap.val() || {};
+    const all = (await getUsersSnapshot({ fresh: req.query.fresh === '1' })).data;
     const accounts = [];
     for (const uid of Object.keys(all)) {
       const p = all[uid]?.profile;
@@ -1348,9 +1371,9 @@ app.get('/api/admin/stats/premium', async (req, res) => {
     const days = [7, 30, 90].includes(Number(req.query.days)) ? Number(req.query.days) : 'start';
     const hit = adminPremiumCache.get(days);
     if (hit && Date.now() - hit.at < ADMIN_STATS_TTL_MS && req.query.fresh !== '1') return res.json({ ...hit.data, cached: true });
-    const snap = await adminDb.ref('users').once('value');
+    const usersData = (await getUsersSnapshot({ fresh: req.query.fresh === '1' })).data;
     const slim = {};
-    for (const [uid, node] of Object.entries(snap.val() || {})) {
+    for (const [uid, node] of Object.entries(usersData)) {
       slim[uid] = { profile: { premiumSubscription: node?.profile?.premiumSubscription, appleMusicComplimentary: node?.profile?.appleMusicComplimentary }, purchases: node?.purchases };
     }
     const data = {
@@ -1405,7 +1428,7 @@ app.get('/api/admin/stats/users', async (req, res) => {
 // zu "gestern bis zur gleichen Uhrzeit". Nur Zähler und Summen. Kurzer Zwischenspeicher (60 s), damit die Seite regelmäßig
 // nachladen kann, ohne Firebase zu belasten.
 let adminTodayCache = null;
-const ADMIN_TODAY_TTL_MS = 60 * 1000;
+const ADMIN_TODAY_TTL_MS = 5 * 60 * 1000;
 app.get('/api/admin/stats/today', async (req, res) => {
   try {
     await requireAdmin(req);
@@ -1415,16 +1438,16 @@ app.get('/api/admin/stats/today', async (req, res) => {
     }
     const today = berlinDateKey();
     const yesterday = addDays(today, -1);
-    const [startedSnap, completedSnap, todaySnap, yesterdaySnap, usersSnap, accounts] = await Promise.all([
+    const [startedSnap, completedSnap, todaySnap, yesterdaySnap, usersSnap, accounts] = await Promise.all([ // usersSnap = geteilter Snapshot ({ data })
       adminDb.ref('analytics/game_started').once('value'),
       adminDb.ref('analytics/game_completed').once('value'),
       adminDb.ref(`dailyResults/${today}`).once('value'),
       adminDb.ref(`dailyResults/${yesterday}`).once('value'),
-      adminDb.ref('users').once('value'),
+      getUsersSnapshot({ fresh: req.query.fresh === '1' }),
       listAuthAccounts(),
     ]);
     const slim = {};
-    for (const [uid, node] of Object.entries(usersSnap.val() || {})) slim[uid] = { purchases: node?.purchases };
+    for (const [uid, node] of Object.entries(usersSnap.data)) slim[uid] = { purchases: node?.purchases };
     const data = {
       generatedAt: new Date().toISOString(),
       ...buildTodayStats({
@@ -1448,8 +1471,7 @@ app.get('/api/admin/testflight-users', async (req, res) => {
     await requireAdmin(req);
     if (!adminDb) return res.status(500).json({ error: 'Firebase nicht verfügbar' });
     const { default: admin } = await import('firebase-admin');
-    const usersSnap = await adminDb.ref('users').once('value');
-    const allUsers = usersSnap.val() || {};
+    const allUsers = (await getUsersSnapshot({ fresh: true })).data;
     const results = [];
     for (const uid of Object.keys(allUsers)) {
       const testChannel = allUsers[uid]?.profile?.testChannel;
@@ -1522,7 +1544,7 @@ app.post('/api/admin/mark-all-existing-as-testers', async (req, res) => {
       updates[`${uid}/profile/testChannelSetAt`] = now;
       marked++;
     }
-    if (marked > 0) await adminDb.ref('users').update(updates);
+    if (marked > 0) { await adminDb.ref('users').update(updates); usersSnapshot = null; }
     res.json({ success: true, checkedUsers: Object.keys(allUsers).length, marked });
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message });
