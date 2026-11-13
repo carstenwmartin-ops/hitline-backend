@@ -128,7 +128,8 @@ export const buildGameStats = (analytics, { days = 30, now = new Date(), launch 
       started: lengthStarted[l] || 0, completed: lengthCompleted[l] || 0, left: lengthLeft[l] || 0,
       completionPct: pct(lengthCompleted[l] || 0, lengthStarted[l] || 0),
     }])),
-    roundsReached: [3, 5, 7, 10].map((m) => ({ round: m, count: reachedCounts[String(m)] || 0 })),
+    roundsReached: [1, 2, 3, 5, 7, 10].map((m) => ({ round: m, count: reachedCounts[String(m)] || 0 })),
+    startHealth: { audioPlayed: reachedCounts.audio || 0, loadFailed: reachedCounts.load_failed || 0 },
     leftAt: {
       total: launchedTotal(left.by_platform_date, keys, launch),
       buckets: ROUND_BUCKETS.map((b) => ({ bucket: b, count: leftBuckets[b] || 0 })),

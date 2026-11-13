@@ -148,7 +148,8 @@ test('Rundenlänge: Abschlussquote je Länge, Abbruchstellen in Klassen', () => 
   assert.deepEqual(s.leftAt.byMode, { classic: 5, race: 1 });
 });
 
-test('Runde erreicht: Meilensteine 3/5/7/10 aus game_round_reached', () => {
-  const s = buildGameStats({ game_round_reached: { by_milestone: { '3': 9, '5': 6, '10': 2 } } }, { days: 7, now: NOW, launch: LAUNCH });
-  assert.deepEqual(s.roundsReached, [{ round: 3, count: 9 }, { round: 5, count: 6 }, { round: 7, count: 0 }, { round: 10, count: 2 }]);
+test('Runde erreicht: Meilensteine 1/2/3/5/7/10 aus game_round_reached', () => {
+  const s = buildGameStats({ game_round_reached: { by_milestone: { '1': 20, '3': 9, '5': 6, '10': 2, audio: 18, load_failed: 3 } } }, { days: 7, now: NOW, launch: LAUNCH });
+  assert.deepEqual(s.roundsReached, [{ round: 1, count: 20 }, { round: 2, count: 0 }, { round: 3, count: 9 }, { round: 5, count: 6 }, { round: 7, count: 0 }, { round: 10, count: 2 }]);
+  assert.deepEqual(s.startHealth, { audioPlayed: 18, loadFailed: 3 });
 });
